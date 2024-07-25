@@ -1,6 +1,9 @@
 use chrono::Utc;
 use clap::{Arg, Command};
 use csv::{Reader, Writer};
+use image::{GenericImageView, Rgba};
+use imageproc::drawing::{draw_filled_circle_mut, draw_filled_rect_mut};
+use imageproc::rect::Rect;
 use mouse_rs::Mouse;
 use rand::seq::SliceRandom;
 use std::fs;
@@ -164,16 +167,29 @@ impl CursorTracker {
                     continue;
                 }
 
-                let img = image::open(&full_frame_path).expect("Failed to open image");
-                let mut img = img.to_rgb8();
+                let mut img = image::open(&full_frame_path).expect("Failed to open image");
+                let (width, height) = img.dimensions();
 
-                // Draw a red circle at the cursor position
-                imageproc::drawing::draw_filled_circle_mut(
+                println!("Image dimensions: {}x{}", width, height);
+                println!("Cursor position: ({}, {})", sample.x, sample.y);
+
+                // Ensure cursor coordinates are within image bounds
+                let x = sample.x.clamp(0, width as i32 - 1) as i32;
+                let y = sample.y.clamp(0, height as i32 - 1) as i32;
+
+                // Convert the image to RGBA
+                let mut img = img.into_rgba8();
+
+                // Draw a large red rectangle at the cursor position
+                // NOTE you have to x2 for hi res displays, gotta account for that.
+                draw_filled_rect_mut(
                     &mut img,
-                    (sample.x as i32, sample.y as i32), // Ensure these are i32
-                    5,
-                    image::Rgb([255, 0, 0]),
+                    Rect::at(x * 2 - 10, y * 2 - 10).of_size(20, 20),
+                    Rgba([255, 0, 0, 255]),
                 );
+
+                // Draw a yellow circle on top of the rectangle
+                draw_filled_circle_mut(&mut img, (x, y), 5, Rgba([255, 255, 0, 255]));
 
                 let output_path = self.session_dir.join(format!("visualized_frame_{}.png", i));
                 img.save(&output_path)
