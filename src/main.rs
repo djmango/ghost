@@ -4,14 +4,27 @@ use csv::{Reader, Writer};
 use mouse_rs::Mouse;
 use rand::seq::SliceRandom;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant};
 
 struct CursorTracker {
     session_dir: PathBuf,
-    video_path: PathBuf,
     data: Vec<CursorData>,
+}
+
+impl CursorTracker {
+    fn video_path(&self) -> PathBuf {
+        self.session_dir.join("recording.mkv")
+    }
+
+    fn frames_dir(&self) -> PathBuf {
+        self.session_dir.join("frames")
+    }
+
+    fn devent_path(&self) -> PathBuf {
+        self.session_dir.join("devents.csv")
+    }
 }
 
 struct CursorData {
@@ -26,10 +39,8 @@ impl CursorTracker {
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
         let session_dir = PathBuf::from(format!("output/{}", timestamp));
         fs::create_dir_all(&session_dir).expect("Failed to create session directory");
-        let video_path = session_dir.join("recording.mkv");
         CursorTracker {
             session_dir,
-            video_path,
             data: Vec::new(),
         }
     }
@@ -51,7 +62,7 @@ impl CursorTracker {
                 "1:0",
                 "-t",
                 &duration.to_string(),
-                self.video_path.to_str().unwrap(),
+                self.video_path().to_str().unwrap(),
             ])
             .spawn()
             .expect("Failed to start FFmpeg");
@@ -76,21 +87,21 @@ impl CursorTracker {
     }
 
     fn extract_relevant_frames(&mut self) {
-        let frames_dir = self.session_dir.join("frames");
+        let frames_dir = self.frames_dir();
         fs::create_dir_all(&frames_dir).expect("Failed to create frames directory");
 
-        // Extract all frames at once
+        // Extract all frames at once with optimized JPEG settings
         let status = ProcessCommand::new("ffmpeg")
             .args(&[
                 "-i",
-                self.video_path.to_str().unwrap(),
+                self.video_path().to_str().unwrap(),
                 "-vf",
                 "fps=30",
                 "-q:v",
-                "2", // High quality (lower means higher quality)
+                "3", // JPEG quality (2-31, lower is higher quality)
                 "-pix_fmt",
-                "rgb24", // Force RGB24 pixel format
-                frames_dir.join("frame_%05d.png").to_str().unwrap(),
+                "yuvj420p", // Use YUV color space for JPEG
+                frames_dir.join("frame_%05d.jpg").to_str().unwrap(),
             ])
             .status()
             .expect("Failed to extract frames");
@@ -101,17 +112,21 @@ impl CursorTracker {
 
         // Update CursorData with frame paths
         for (i, data) in self.data.iter_mut().enumerate() {
-            let frame_path = format!("frames/frame_{:05}.png", i + 1);
+            let frame_number = i + 1; // FFmpeg starts numbering from 1
+            let frame_path = format!("frame_{:05}.jpg", frame_number);
             if frames_dir.join(&frame_path).exists() {
                 data.frame_path = Some(frame_path);
             } else {
-                println!("Warning: Frame not found for timestamp: {}", data.timestamp);
+                println!(
+                    "Warning: Frame not found for timestamp: {}. Expected file: {}",
+                    data.timestamp, frame_path
+                );
             }
         }
     }
 
     fn save_to_csv(&self) {
-        let csv_path = self.session_dir.join("cursor_data.csv");
+        let csv_path = self.devent_path();
         let mut writer = Writer::from_path(csv_path).expect("Failed to create CSV writer");
         writer
             .write_record(&["timestamp", "x", "y", "frame_path"])
@@ -137,14 +152,25 @@ impl CursorTracker {
 
         for (i, sample) in samples.iter().enumerate() {
             if let Some(frame_path) = &sample.frame_path {
-                let img =
-                    image::open(self.session_dir.join(frame_path)).expect("Failed to open image");
+                let full_frame_path = self.frames_dir().join(frame_path);
+
+                println!("Attempting to open image at: {:?}", full_frame_path);
+
+                if !full_frame_path.exists() {
+                    println!(
+                        "Warning: File does not exist at path: {:?}",
+                        full_frame_path
+                    );
+                    continue;
+                }
+
+                let img = image::open(&full_frame_path).expect("Failed to open image");
                 let mut img = img.to_rgb8();
 
                 // Draw a red circle at the cursor position
                 imageproc::drawing::draw_filled_circle_mut(
                     &mut img,
-                    (sample.x, sample.y),
+                    (sample.x as i32, sample.y as i32), // Ensure these are i32
                     5,
                     image::Rgb([255, 0, 0]),
                 );
@@ -227,13 +253,12 @@ fn main() {
                 .expect("No recording found");
 
             // Load the data from the CSV file
-            let csv_path = latest_dir.join("cursor_data.csv");
-            let mut reader = Reader::from_path(csv_path).expect("Failed to read CSV");
             let mut tracker = CursorTracker {
                 session_dir: latest_dir,
-                video_path: PathBuf::new(), // We don't need this for visualization
                 data: Vec::new(),
             };
+            let csv_path = tracker.devent_path();
+            let mut reader = Reader::from_path(csv_path).expect("Failed to read CSV");
 
             for result in reader.records() {
                 let record = result.expect("Failed to read CSV record");
