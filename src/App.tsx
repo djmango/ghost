@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import reactLogo from "./assets/react.svg";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
@@ -6,6 +6,21 @@ import "./App.css";
 function App() {
   const [greetMsg, setGreetMsg] = useState("");
   const [name, setName] = useState("");
+  const [monitors, setMonitors] = useState<string[]>([]);
+
+  useEffect(() => {
+    // Fetch monitors on component mount
+    async function fetchMonitors() {
+      try {
+        const monitorNames = await invoke<string[]>('get_monitors');
+        setMonitors(monitorNames);
+      } catch (error) {
+        console.error('Failed to fetch monitors:', error);
+      }
+    }
+
+    fetchMonitors();
+  }, []);
 
   async function greet() {
     // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
@@ -14,7 +29,8 @@ function App() {
 
   return (
     <div className="container">
-      <h1>Welcome to Tauri!</h1>
+      <h1>Welcome to i.inc!</h1>
+      <h2>Monitor Name: {monitors}</h2>
 
       <div className="row">
         <a href="https://vitejs.dev" target="_blank">

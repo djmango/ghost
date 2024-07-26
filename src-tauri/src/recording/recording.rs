@@ -1,5 +1,4 @@
 use chrono::Utc;
-use clap::{Arg, Command};
 use csv::{Reader, Writer};
 use image::{GenericImageView, Rgba};
 use imageproc::drawing::{draw_filled_circle_mut, draw_filled_rect_mut};
@@ -10,9 +9,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::monitor::MonitorHandle;
-use winit::raw_window_handle::HasDisplayHandle;
+use tauri::window::Monitor;
+use tauri::App;
+use tauri::AppHandle;
+use tauri::Window;
 
 struct CursorTracker {
     session_dir: PathBuf,
@@ -39,29 +39,13 @@ impl CursorTracker {
         }
     }
 
-    fn get_current_monitor(&self, active_event_loop: &ActiveEventLoop) -> Option<MonitorHandle> {
-        let mouse = Mouse::new();
-        if let Ok(pos) = mouse.get_position() {
-            let position = winit::dpi::PhysicalPosition::new(pos.x, pos.y);
-            active_event_loop.available_monitors().find(|m| {
-                let size = m.size();
-                let monitor_pos = m.position();
-                position.x >= monitor_pos.x
-                    && position.x < monitor_pos.x + size.width as i32
-                    && position.y >= monitor_pos.y
-                    && position.y < monitor_pos.y + size.height as i32
-            })
-        } else {
-            active_event_loop.primary_monitor()
-        }
-    }
-
     fn start_recording(&mut self, duration: u64) {
-        let event_loop = EventLoop::new().unwrap();
-        let monitor = event_loop.display_handle().unwrap();
+        // let monitor = App::monitor_from_point(&tauri::App, (0, 0)).unwrap();
 
-        let scale_factor = monitor.scale_factor();
-        let monitor_id = monitor.name().unwrap_or_else(|| "0".to_string());
+        // let scale_factor = monitor.scale_factor();
+        // let monitor_id = monitor.name().unwrap_or_else(|| "0".to_string());
+        let scale_factor = 1.0;
+        let monitor_id = "0";
 
         // Start FFmpeg process
         let output_path = self.session_dir.join("screen_recording.mp4");
@@ -219,94 +203,94 @@ impl CursorTracker {
     }
 }
 
-fn main() {
-    let matches = Command::new("i.inc Desktop Event (devent) Recorder")
-        .version("1.0")
-        .author("Invisibility Inc - Sulaiman Ghori")
-        .about("Tracks cursor movement and captures screenshots")
-        .subcommand(
-            Command::new("record").about("Records cursor movement").arg(
-                Arg::new("duration")
-                    .short('d')
-                    .long("duration")
-                    .value_name("SECONDS")
-                    .help("Recording duration in seconds")
-                    .default_value("10"),
-            ),
-        )
-        .subcommand(
-            Command::new("visualize")
-                .about("Visualizes random samples from the latest recording")
-                .arg(
-                    Arg::new("samples")
-                        .short('n')
-                        .long("samples")
-                        .value_name("NUMBER")
-                        .help("Number of random samples to visualize")
-                        .default_value("5"),
-                ),
-        )
-        .get_matches();
+// fn main() {
+//     let matches = Command::new("i.inc Desktop Event (devent) Recorder")
+//         .version("1.0")
+//         .author("Invisibility Inc - Sulaiman Ghori")
+//         .about("Tracks cursor movement and captures screenshots")
+//         .subcommand(
+//             Command::new("record").about("Records cursor movement").arg(
+//                 Arg::new("duration")
+//                     .short('d')
+//                     .long("duration")
+//                     .value_name("SECONDS")
+//                     .help("Recording duration in seconds")
+//                     .default_value("10"),
+//             ),
+//         )
+//         .subcommand(
+//             Command::new("visualize")
+//                 .about("Visualizes random samples from the latest recording")
+//                 .arg(
+//                     Arg::new("samples")
+//                         .short('n')
+//                         .long("samples")
+//                         .value_name("NUMBER")
+//                         .help("Number of random samples to visualize")
+//                         .default_value("5"),
+//                 ),
+//         )
+//         .get_matches();
 
-    match matches.subcommand() {
-        Some(("record", record_matches)) => {
-            let duration = record_matches
-                .get_one::<String>("duration")
-                .unwrap()
-                .parse()
-                .expect("Invalid duration");
+//     match matches.subcommand() {
+//         Some(("record", record_matches)) => {
+//             let duration = record_matches
+//                 .get_one::<String>("duration")
+//                 .unwrap()
+//                 .parse()
+//                 .expect("Invalid duration");
 
-            let mut tracker = CursorTracker::new();
-            println!("Recording for {} seconds...", duration);
-            tracker.start_recording(duration);
-            println!("Extracting relevant frames...");
-            tracker.extract_relevant_frames();
-            tracker.save_to_csv();
-            println!("Recording saved to {:?}", tracker.session_dir);
-        }
-        Some(("visualize", visualize_matches)) => {
-            let samples = visualize_matches
-                .get_one::<String>("samples")
-                .unwrap()
-                .parse()
-                .expect("Invalid number of samples");
+//             let mut tracker = CursorTracker::new();
+//             println!("Recording for {} seconds...", duration);
+//             tracker.start_recording(duration);
+//             println!("Extracting relevant frames...");
+//             tracker.extract_relevant_frames();
+//             tracker.save_to_csv();
+//             println!("Recording saved to {:?}", tracker.session_dir);
+//         }
+//         Some(("visualize", visualize_matches)) => {
+//             let samples = visualize_matches
+//                 .get_one::<String>("samples")
+//                 .unwrap()
+//                 .parse()
+//                 .expect("Invalid number of samples");
 
-            // Find the latest recording directory
-            let latest_dir = fs::read_dir("output")
-                .expect("Failed to read output directory")
-                .filter_map(|entry| {
-                    let entry = entry.ok()?;
-                    let path = entry.path();
-                    if path.is_dir() {
-                        Some(path)
-                    } else {
-                        None
-                    }
-                })
-                .max_by_key(|path| path.metadata().unwrap().modified().unwrap())
-                .expect("No recording found");
+//             // Find the latest recording directory
+//             let latest_dir = fs::read_dir("output")
+//                 .expect("Failed to read output directory")
+//                 .filter_map(|entry| {
+//                     let entry = entry.ok()?;
+//                     let path = entry.path();
+//                     if path.is_dir() {
+//                         Some(path)
+//                     } else {
+//                         None
+//                     }
+//                 })
+//                 .max_by_key(|path| path.metadata().unwrap().modified().unwrap())
+//                 .expect("No recording found");
 
-            // Load the data from the CSV file
-            let mut tracker = CursorTracker {
-                session_dir: latest_dir,
-                data: Vec::new(),
-            };
-            let csv_path = tracker.devent_path();
-            let mut reader = Reader::from_path(csv_path).expect("Failed to read CSV");
+//             // Load the data from the CSV file
+//             let mut tracker = CursorTracker {
+//                 session_dir: latest_dir,
+//                 data: Vec::new(),
+//             };
+//             let csv_path = tracker.devent_path();
+//             let mut reader = Reader::from_path(csv_path).expect("Failed to read CSV");
 
-            for result in reader.records() {
-                let record = result.expect("Failed to read CSV record");
-                tracker.data.push(CursorData {
-                    timestamp: record[0].to_string(),
-                    x: record[1].parse().unwrap(),
-                    y: record[2].parse().unwrap(),
-                    frame_path: Some(record[3].to_string()),
-                });
-            }
+//             for result in reader.records() {
+//                 let record = result.expect("Failed to read CSV record");
+//                 tracker.data.push(CursorData {
+//                     timestamp: record[0].to_string(),
+//                     x: record[1].parse().unwrap(),
+//                     y: record[2].parse().unwrap(),
+//                     frame_path: Some(record[3].to_string()),
+//                 });
+//             }
 
-            println!("Visualizing {} random samples...", samples);
-            tracker.visualize(samples);
-        }
-        _ => println!("Please specify a valid subcommand. Use --help for more information."),
-    }
-}
+//             println!("Visualizing {} random samples...", samples);
+//             tracker.visualize(samples);
+//         }
+//         _ => println!("Please specify a valid subcommand. Use --help for more information."),
+//     }
+// }
