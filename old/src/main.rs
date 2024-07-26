@@ -10,26 +10,16 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant};
+use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::monitor::MonitorHandle;
+use winit::raw_window_handle::HasDisplayHandle;
 
 struct CursorTracker {
     session_dir: PathBuf,
     data: Vec<CursorData>,
 }
 
-impl CursorTracker {
-    fn video_path(&self) -> PathBuf {
-        self.session_dir.join("recording.mkv")
-    }
-
-    fn frames_dir(&self) -> PathBuf {
-        self.session_dir.join("frames")
-    }
-
-    fn devent_path(&self) -> PathBuf {
-        self.session_dir.join("devents.csv")
-    }
-}
-
+#[derive(Clone)]
 struct CursorData {
     timestamp: String,
     x: i32,
@@ -41,52 +31,89 @@ impl CursorTracker {
     fn new() -> Self {
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
         let session_dir = PathBuf::from(format!("output/{}", timestamp));
-        fs::create_dir_all(&session_dir).expect("Failed to create session directory");
+        std::fs::create_dir_all(&session_dir).expect("Failed to create session directory");
+
         CursorTracker {
             session_dir,
             data: Vec::new(),
         }
     }
 
-    fn start_recording(&mut self, duration: u64) {
-        let start_time = Instant::now();
+    fn get_current_monitor(&self, active_event_loop: &ActiveEventLoop) -> Option<MonitorHandle> {
         let mouse = Mouse::new();
+        if let Ok(pos) = mouse.get_position() {
+            let position = winit::dpi::PhysicalPosition::new(pos.x, pos.y);
+            active_event_loop.available_monitors().find(|m| {
+                let size = m.size();
+                let monitor_pos = m.position();
+                position.x >= monitor_pos.x
+                    && position.x < monitor_pos.x + size.width as i32
+                    && position.y >= monitor_pos.y
+                    && position.y < monitor_pos.y + size.height as i32
+            })
+        } else {
+            active_event_loop.primary_monitor()
+        }
+    }
+
+    fn start_recording(&mut self, duration: u64) {
+        let event_loop = EventLoop::new().unwrap();
+        let monitor = event_loop.display_handle().unwrap();
+
+        let scale_factor = monitor.scale_factor();
+        let monitor_id = monitor.name().unwrap_or_else(|| "0".to_string());
 
         // Start FFmpeg process
-        let mut ffmpeg = ProcessCommand::new("ffmpeg")
+        let output_path = self.session_dir.join("screen_recording.mp4");
+        let _ffmpeg_command = ProcessCommand::new("ffmpeg")
             .args(&[
                 "-f",
                 "avfoundation",
-                "-capture_cursor",
-                "1",
-                "-capture_mouse_clicks",
-                "1",
                 "-i",
-                "1:0",
+                &format!("{}:none", monitor_id),
+                "-r",
+                "30",
                 "-t",
                 &duration.to_string(),
-                self.video_path().to_str().unwrap(),
+                "-y",
+                output_path.to_str().unwrap(),
             ])
             .spawn()
             .expect("Failed to start FFmpeg");
 
-        // Collect cursor data while FFmpeg is recording
-        while start_time.elapsed() < Duration::from_secs(duration) {
-            let pos = mouse.get_position().expect("Failed to get mouse position");
-            let timestamp = Utc::now().format("%Y%m%d%H%M%S%.3f").to_string();
+        let start_time = Instant::now();
+        let mouse = Mouse::new();
 
-            self.data.push(CursorData {
-                timestamp,
-                x: pos.x,
-                y: pos.y,
-                frame_path: None,
-            });
+        while start_time.elapsed() < Duration::from_secs(duration) {
+            if let Ok(pos) = mouse.get_position() {
+                let timestamp = Utc::now().format("%Y%m%d%H%M%S%.3f").to_string();
+                let scaled_x = (pos.x as f64 * scale_factor) as i32;
+                let scaled_y = (pos.y as f64 * scale_factor) as i32;
+
+                self.data.push(CursorData {
+                    timestamp,
+                    x: scaled_x,
+                    y: scaled_y,
+                    frame_path: None,
+                });
+            }
 
             std::thread::sleep(Duration::from_millis(33)); // ~30 FPS
         }
 
-        // Wait for FFmpeg to finish
-        ffmpeg.wait().expect("FFmpeg failed");
+        // FFmpeg will automatically stop after the specified duration
+    }
+
+    fn video_path(&self) -> PathBuf {
+        self.session_dir.join("recording.mkv")
+    }
+
+    fn frames_dir(&self) -> PathBuf {
+        self.session_dir.join("frames")
+    }
+
+    fn devent_path(&self) -> PathBuf {
+        self.session_dir.join("devents.csv")
     }
 
     fn extract_relevant_frames(&mut self) {
@@ -157,8 +184,6 @@ impl CursorTracker {
             if let Some(frame_path) = &sample.frame_path {
                 let full_frame_path = self.frames_dir().join(frame_path);
 
-                println!("Attempting to open image at: {:?}", full_frame_path);
-
                 if !full_frame_path.exists() {
                     println!(
                         "Warning: File does not exist at path: {:?}",
@@ -170,21 +195,14 @@ impl CursorTracker {
                 let mut img = image::open(&full_frame_path).expect("Failed to open image");
                 let (width, height) = img.dimensions();
 
-                println!("Image dimensions: {}x{}", width, height);
-                println!("Cursor position: ({}, {})", sample.x, sample.y);
-
                 // Ensure cursor coordinates are within image bounds
-                let x = sample.x.clamp(0, width as i32 - 1) as i32;
-                let y = sample.y.clamp(0, height as i32 - 1) as i32;
-
-                // Convert the image to RGBA
-                let mut img = img.into_rgba8();
+                let x = sample.x.clamp(0, width as i32 - 1);
+                let y = sample.y.clamp(0, height as i32 - 1);
 
                 // Draw a large red rectangle at the cursor position
-                // NOTE you have to x2 for hi res displays, gotta account for that.
                 draw_filled_rect_mut(
                     &mut img,
-                    Rect::at(x * 2 - 10, y * 2 - 10).of_size(20, 20),
+                    Rect::at(x - 10, y - 10).of_size(20, 20),
                     Rgba([255, 0, 0, 255]),
                 );
 
