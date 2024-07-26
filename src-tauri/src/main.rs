@@ -1,9 +1,11 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod recording;
+
 use tauri::{AppHandle, Manager, Window};
 
-mod recording;
+use crate::recording::start_recording;
 
 // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
 #[tauri::command]
@@ -13,8 +15,6 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn get_monitors(window: Window) -> String {
-    println!("{:?}", window.current_monitor().unwrap().unwrap());
-    println!("{:?}", window.current_monitor().unwrap().unwrap().name());
     window
         .current_monitor()
         .unwrap()
@@ -42,7 +42,11 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             let _ = show_window(app);
         }))
-        .invoke_handler(tauri::generate_handler![greet, get_monitors])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            get_monitors,
+            start_recording
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

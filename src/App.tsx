@@ -1,69 +1,124 @@
-import { useEffect, useState } from "react";
-import reactLogo from "./assets/react.svg";
+import React, { useState, useEffect } from 'react';
 import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import "./styles.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
-  const [monitors, setMonitors] = useState<string[]>([]);
+type Monitor = string;
+
+type AlertType = 'error' | 'success';
+
+interface Alert {
+  type: AlertType;
+  message: string;
+}
+
+const MainScreen: React.FC = () => {
+  const [monitors, setMonitors] = useState<Monitor[]>([]);
+  const [isRecording, setIsRecording] = useState<boolean>(false);
+  const [recordingDuration, setRecordingDuration] = useState<number>(10);
+  const [alert, setAlert] = useState<Alert | null>(null);
 
   useEffect(() => {
-    // Fetch monitors on component mount
     async function fetchMonitors() {
       try {
         const monitorNames = await invoke<string[]>('get_monitors');
         setMonitors(monitorNames);
       } catch (error) {
         console.error('Failed to fetch monitors:', error);
+        setAlert({ type: 'error', message: 'Failed to fetch monitors' });
       }
     }
 
     fetchMonitors();
   }, []);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
-    setGreetMsg(await invoke("greet", { name }));
-  }
+  const startRecording = async () => {
+    try {
+      setIsRecording(true);
+      await invoke('start_recording', { duration: recordingDuration });
+      setAlert({ type: 'success', message: 'Recording completed successfully' });
+    } catch (error) {
+      console.error('Failed to start recording:', error);
+      setAlert({ type: 'error', message: 'Failed to start recording' });
+    } finally {
+      setIsRecording(false);
+    }
+  };
 
   return (
-    <div className="container">
-      <h1>Welcome to i.inc!</h1>
-      <h2>Monitor Name: {monitors}</h2>
+    <div style={{
+      minHeight: '100vh',
+      backgroundColor: 'white',
+      color: '#1a202c',
+      padding: '2rem',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center'
+    }}>
+      <div style={{
+        maxWidth: '64rem',
+        width: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        textAlign: 'center'
+      }}>
+        <h1>Welcome to i.inc!</h1>
+        <h2>Monitor Name: {monitors}</h2>
 
-      <div className="row">
-        <a href="https://vitejs.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://reactjs.org" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: '3rem' }}>
+          <img src="/logo.svg" alt="i.inc logo" style={{ width: '2rem', height: '2rem' }} />
+          <h1 style={{ fontSize: '1.875rem', fontWeight: 'bold', marginLeft: '1rem' }}>i.inc Desktop Event Recorder</h1>
+        </div>
+
+        {alert && (
+          <div style={{
+            padding: '1rem',
+            marginBottom: '1.5rem',
+            borderRadius: '0.375rem',
+            backgroundColor: alert.type === 'error' ? '#fee2e2' : '#d1fae5',
+            color: alert.type === 'error' ? '#dc2626' : '#047857'
+          }}>
+            {alert.message}
+          </div>
+        )}
+
+        <div style={{ marginBottom: '2rem' }}>
+          <h3 style={{ fontSize: '1.25rem', fontWeight: 'semibold', marginBottom: '1rem' }}>Recording Settings</h3>
+          <div style={{ display: 'flex', alignItems: 'center' }}>
+            <label htmlFor="duration" style={{ marginRight: '1rem' }}>Duration (seconds):</label>
+            <input
+              id="duration"
+              type="number"
+              value={recordingDuration}
+              onChange={(e) => setRecordingDuration(parseInt(e.target.value))}
+              style={{
+                border: '1px solid #d1d5db',
+                borderRadius: '0.25rem',
+                padding: '0.25rem 0.5rem',
+                width: '5rem'
+              }}
+            />
+          </div>
+        </div>
+
+        <button
+          onClick={startRecording}
+          disabled={isRecording}
+          style={{
+            backgroundColor: '#1a202c',
+            color: 'white',
+            padding: '0.5rem 1.5rem',
+            borderRadius: '0.25rem',
+            cursor: isRecording ? 'not-allowed' : 'pointer',
+            opacity: isRecording ? 0.5 : 1
+          }}
+        >
+          {isRecording ? 'Recording...' : 'Start Recording'}
+        </button>
       </div>
-
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-
-      <p>{greetMsg}</p>
     </div>
   );
-}
+};
 
-export default App;
+export default MainScreen;

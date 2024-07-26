@@ -9,9 +9,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant};
-use tauri::window::Monitor;
-use tauri::App;
-use tauri::AppHandle;
 use tauri::Window;
 
 struct CursorTracker {
@@ -39,7 +36,7 @@ impl CursorTracker {
         }
     }
 
-    fn start_recording(&mut self, duration: u64) {
+    fn start_recording(&mut self, duration: u64, window: Window) {
         // let monitor = App::monitor_from_point(&tauri::App, (0, 0)).unwrap();
 
         // let scale_factor = monitor.scale_factor();
@@ -201,6 +198,17 @@ impl CursorTracker {
             }
         }
     }
+}
+
+#[tauri::command]
+pub fn start_recording(duration: u64, window: Window) {
+    let mut tracker = CursorTracker::new();
+    println!("Recording for {} seconds...", duration);
+    tracker.start_recording(duration, window);
+    println!("Extracting relevant frames...");
+    tracker.extract_relevant_frames();
+    tracker.save_to_csv();
+    println!("Recording saved to {:?}", tracker.session_dir);
 }
 
 // fn main() {
