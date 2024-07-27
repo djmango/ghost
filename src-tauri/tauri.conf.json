@@ -1,7 +1,7 @@
 {
-  "productName": "Zanzibar",
+  "productName": "Invisibility Ghost",
   "version": "0.0.0",
-  "identifier": "inc.i.zanzibar",
+  "identifier": "inc.i.ghost",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "Invisibility Inc | Zanzibar",
+        "title": "Invisibility Inc | Ghost",
         "width": 800,
         "height": 600
       }

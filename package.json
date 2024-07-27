@@ -1,5 +1,5 @@
 {
-  "name": "zanzibar",
+  "name": "Invisibility Ghost",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0-beta.15",
+    "@tauri-apps/plugin-log": "^2.0.0-beta.8",
     "@tauri-apps/plugin-shell": "^2.0.0-beta.8",
     "autoprefixer": "^10.4.19",
     "postcss-cli": "^11.0.0",

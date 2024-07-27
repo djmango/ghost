@@ -3,15 +3,11 @@
 
 mod recording;
 
+use log::LevelFilter;
 use tauri::{AppHandle, Manager, Window};
+use tauri_plugin_log::{Target, TargetKind};
 
 use crate::recording::start_recording;
-
-// Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
 
 #[tauri::command]
 fn get_monitors(window: Window) -> String {
@@ -37,16 +33,23 @@ fn show_window(app: &AppHandle) {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             let _ = show_window(app);
         }))
-        .invoke_handler(tauri::generate_handler![
-            greet,
-            get_monitors,
-            start_recording
-        ])
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(LevelFilter::Debug)
+                .targets([
+                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::LogDir { file_name: None }),
+                    Target::new(TargetKind::Webview),
+                ])
+                .build(),
+        )
+        .invoke_handler(tauri::generate_handler![get_monitors, start_recording])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -1,15 +1,18 @@
 use chrono::Utc;
-use csv::{Reader, Writer};
-use image::{GenericImageView, Rgba};
+use csv::Writer;
+use image::ImageDecoder;
+use image::Rgba;
 use imageproc::drawing::{draw_filled_circle_mut, draw_filled_rect_mut};
 use imageproc::rect::Rect;
-use mouse_rs::Mouse;
 use rand::seq::SliceRandom;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant};
-use tauri::Window;
+use tauri::{Emitter, Window};
+use tokio::task;
+use tracing::info;
+use uuid::Uuid;
+use xcap::Monitor;
 
 struct CursorTracker {
     session_dir: PathBuf,
@@ -18,17 +21,18 @@ struct CursorTracker {
 
 #[derive(Clone)]
 struct CursorData {
+    session_id: Uuid,
     timestamp: String,
     x: i32,
     y: i32,
-    frame_path: Option<String>,
+    frame_path: String,
 }
 
 impl CursorTracker {
     fn new() -> Self {
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
         let session_dir = PathBuf::from(format!("output/{}", timestamp));
-        std::fs::create_dir_all(&session_dir).expect("Failed to create session directory");
+        fs::create_dir_all(&session_dir).expect("Failed to create session directory");
 
         CursorTracker {
             session_dir,
@@ -37,56 +41,39 @@ impl CursorTracker {
     }
 
     fn start_recording(&mut self, duration: u64, window: Window) {
-        // let monitor = App::monitor_from_point(&tauri::App, (0, 0)).unwrap();
-
-        // let scale_factor = monitor.scale_factor();
-        // let monitor_id = monitor.name().unwrap_or_else(|| "0".to_string());
-        let scale_factor = 1.0;
-        let monitor_id = "0";
-
-        // Start FFmpeg process
-        let output_path = self.session_dir.join("screen_recording.mp4");
-        let _ffmpeg_command = ProcessCommand::new("ffmpeg")
-            .args(&[
-                "-f",
-                "avfoundation",
-                "-i",
-                &format!("{}:none", monitor_id),
-                "-r",
-                "30",
-                "-t",
-                &duration.to_string(),
-                "-y",
-                output_path.to_str().unwrap(),
-            ])
-            .spawn()
-            .expect("Failed to start FFmpeg");
-
+        let monitor = Monitor::all().unwrap().iter().next().unwrap().clone();
+        let session_id = Uuid::new_v4();
+        let scale_factor = monitor.scale_factor();
         let start_time = Instant::now();
-        let mouse = Mouse::new();
+        let monitors = Monitor::all().unwrap();
+        info!("Recording on monitor: {:?}", monitors);
+
+        // Ensure the frames directory exists
+        fs::create_dir_all(self.frames_dir()).expect("Failed to create frames directory");
 
         while start_time.elapsed() < Duration::from_secs(duration) {
-            if let Ok(pos) = mouse.get_position() {
+            let image = monitor.capture_image().unwrap();
+            let frame_path = format!("frame_{}.png", self.data.len());
+            info!("Saving frame to: {:?}", frame_path);
+            let full_frame_path = self.frames_dir().join(&frame_path);
+            image.save(&full_frame_path).expect("Failed to save frame");
+
+            if let Ok(pos) = window.cursor_position() {
                 let timestamp = Utc::now().format("%Y%m%d%H%M%S%.3f").to_string();
-                let scaled_x = (pos.x as f64 * scale_factor) as i32;
-                let scaled_y = (pos.y as f64 * scale_factor) as i32;
+                let scaled_x = (pos.x as f32 * scale_factor) as i32;
+                let scaled_y = (pos.y as f32 * scale_factor) as i32;
 
                 self.data.push(CursorData {
+                    session_id,
                     timestamp,
                     x: scaled_x,
                     y: scaled_y,
-                    frame_path: None,
+                    frame_path,
                 });
             }
 
             std::thread::sleep(Duration::from_millis(33)); // ~30 FPS
         }
-
-        // FFmpeg will automatically stop after the specified duration
-    }
-
-    fn video_path(&self) -> PathBuf {
-        self.session_dir.join("recording.mkv")
     }
 
     fn frames_dir(&self) -> PathBuf {
@@ -97,59 +84,21 @@ impl CursorTracker {
         self.session_dir.join("devents.csv")
     }
 
-    fn extract_relevant_frames(&mut self) {
-        let frames_dir = self.frames_dir();
-        fs::create_dir_all(&frames_dir).expect("Failed to create frames directory");
-
-        // Extract all frames at once with optimized JPEG settings
-        let status = ProcessCommand::new("ffmpeg")
-            .args(&[
-                "-i",
-                self.video_path().to_str().unwrap(),
-                "-vf",
-                "fps=30",
-                "-q:v",
-                "3", // JPEG quality (2-31, lower is higher quality)
-                "-pix_fmt",
-                "yuvj420p", // Use YUV color space for JPEG
-                frames_dir.join("frame_%05d.jpg").to_str().unwrap(),
-            ])
-            .status()
-            .expect("Failed to extract frames");
-
-        if !status.success() {
-            println!("Warning: Frame extraction may have failed");
-        }
-
-        // Update CursorData with frame paths
-        for (i, data) in self.data.iter_mut().enumerate() {
-            let frame_number = i + 1; // FFmpeg starts numbering from 1
-            let frame_path = format!("frame_{:05}.jpg", frame_number);
-            if frames_dir.join(&frame_path).exists() {
-                data.frame_path = Some(frame_path);
-            } else {
-                println!(
-                    "Warning: Frame not found for timestamp: {}. Expected file: {}",
-                    data.timestamp, frame_path
-                );
-            }
-        }
-    }
-
     fn save_to_csv(&self) {
         let csv_path = self.devent_path();
         let mut writer = Writer::from_path(csv_path).expect("Failed to create CSV writer");
         writer
-            .write_record(&["timestamp", "x", "y", "frame_path"])
+            .write_record(&["session_id", "timestamp", "x", "y", "frame_path"])
             .expect("Failed to write CSV header");
 
         for data in &self.data {
             writer
                 .write_record(&[
+                    &data.session_id.to_string(),
                     &data.timestamp,
                     &data.x.to_string(),
                     &data.y.to_string(),
-                    data.frame_path.as_deref().unwrap_or(""),
+                    &data.frame_path,
                 ])
                 .expect("Failed to write CSV record");
         }
@@ -162,53 +111,58 @@ impl CursorTracker {
         let samples: Vec<&CursorData> = self.data.choose_multiple(&mut rng, num_samples).collect();
 
         for (i, sample) in samples.iter().enumerate() {
-            if let Some(frame_path) = &sample.frame_path {
-                let full_frame_path = self.frames_dir().join(frame_path);
+            let full_frame_path = self.frames_dir().join(sample.frame_path.as_str());
 
-                if !full_frame_path.exists() {
-                    println!(
-                        "Warning: File does not exist at path: {:?}",
-                        full_frame_path
-                    );
-                    continue;
-                }
-
-                let mut img = image::open(&full_frame_path).expect("Failed to open image");
-                let (width, height) = img.dimensions();
-
-                // Ensure cursor coordinates are within image bounds
-                let x = sample.x.clamp(0, width as i32 - 1);
-                let y = sample.y.clamp(0, height as i32 - 1);
-
-                // Draw a large red rectangle at the cursor position
-                draw_filled_rect_mut(
-                    &mut img,
-                    Rect::at(x - 10, y - 10).of_size(20, 20),
-                    Rgba([255, 0, 0, 255]),
+            if !full_frame_path.exists() {
+                info!(
+                    "Warning: File does not exist at path: {:?}",
+                    full_frame_path
                 );
-
-                // Draw a yellow circle on top of the rectangle
-                draw_filled_circle_mut(&mut img, (x, y), 5, Rgba([255, 255, 0, 255]));
-
-                let output_path = self.session_dir.join(format!("visualized_frame_{}.png", i));
-                img.save(&output_path)
-                    .expect("Failed to save visualized image");
-
-                println!("Visualized frame saved to: {:?}", output_path);
+                continue;
             }
+
+            let mut img = image::open(&full_frame_path).expect("Failed to open image");
+            let (width, height) = img.dimensions();
+
+            // Ensure cursor coordinates are within image bounds
+            let x = sample.x.clamp(0, width as i32 - 1);
+            let y = sample.y.clamp(0, height as i32 - 1);
+
+            // Draw a large red rectangle at the cursor position
+            draw_filled_rect_mut(
+                &mut img,
+                Rect::at(x - 10, y - 10).of_size(20, 20),
+                Rgba([255, 0, 0, 255]),
+            );
+
+            // Draw a yellow circle on top of the rectangle
+            draw_filled_circle_mut(&mut img, (x, y), 5, Rgba([255, 255, 0, 255]));
+
+            let output_path = self.session_dir.join(format!("visualized_frame_{}.png", i));
+            img.save(&output_path)
+                .expect("Failed to save visualized image");
+
+            info!("Visualized frame saved to: {:?}", output_path);
         }
     }
 }
 
 #[tauri::command]
-pub fn start_recording(duration: u64, window: Window) {
-    let mut tracker = CursorTracker::new();
-    println!("Recording for {} seconds...", duration);
-    tracker.start_recording(duration, window);
-    println!("Extracting relevant frames...");
-    tracker.extract_relevant_frames();
-    tracker.save_to_csv();
-    println!("Recording saved to {:?}", tracker.session_dir);
+pub async fn start_recording(duration: u64, window: tauri::Window) {
+    // Spawn the recording task in the background
+    task::spawn(async move {
+        let mut tracker = CursorTracker::new();
+        info!("Recording for {} seconds...", duration);
+        tracker.start_recording(duration, window.clone());
+        tracker.save_to_csv();
+        info!("Recording saved to {:?}", tracker.session_dir);
+        tracker.visualize(5);
+
+        // Emit an event when recording is complete
+        window
+            .emit("recording_complete", &tracker.session_dir)
+            .unwrap();
+    });
 }
 
 // fn main() {

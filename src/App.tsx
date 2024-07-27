@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { trace, info, error, attachConsole } from '@tauri-apps/plugin-log';
 import "./styles.css";
 
 type Monitor = string;
@@ -17,29 +19,63 @@ const MainScreen: React.FC = () => {
   const [recordingDuration, setRecordingDuration] = useState<number>(10);
   const [alert, setAlert] = useState<Alert | null>(null);
 
+
   useEffect(() => {
+    async function setupLogs() {
+      // const detach = await attachConsole();
+      await attachConsole();
+      trace('This is a trace message');
+      info('This is an info message');
+      error('This is an error message');
+    }
+
+    setupLogs();
+
     async function fetchMonitors() {
       try {
         const monitorNames = await invoke<string[]>('get_monitors');
         setMonitors(monitorNames);
-      } catch (error) {
-        console.error('Failed to fetch monitors:', error);
+      } catch (error: any) {
+        // error('Failed to fetch monitors:', error);
+        error(`Failed to fetch monitors: ${error}`);
         setAlert({ type: 'error', message: 'Failed to fetch monitors' });
       }
     }
 
     fetchMonitors();
+
+
+    // Listen for the recording_complete event
+    const unlistenComplete = listen('recording_complete', (event) => {
+      info(`Recording completed: ${event.payload}`)
+      setAlert({ type: 'success', message: `Recording completed successfully. Saved to ${event.payload}` });
+      setIsRecording(false);
+    });
+
+    // Listen for the recording_error event
+    const unlistenError = listen('recording_error', (event) => {
+      error(`Recording error: ${event.payload}`);
+      setAlert({ type: 'error', message: `Recording failed: ${event.payload}` });
+      setIsRecording(false);
+    });
+
+    // Cleanup listeners on component unmount
+    return () => {
+      unlistenComplete.then(f => f());
+      unlistenError.then(f => f());
+    };
   }, []);
 
   const startRecording = async () => {
     try {
       setIsRecording(true);
+      setAlert(null); // Clear any previous alerts
       await invoke('start_recording', { duration: recordingDuration });
-      setAlert({ type: 'success', message: 'Recording completed successfully' });
-    } catch (error) {
-      console.error('Failed to start recording:', error);
+      // The recording process has started, but we don't know if it's successful yet.
+      // We'll wait for the recording_complete or recording_error event.
+    } catch (error: any) {
+      error(`Failed to start recording: ${error}`);
       setAlert({ type: 'error', message: 'Failed to start recording' });
-    } finally {
       setIsRecording(false);
     }
   };
