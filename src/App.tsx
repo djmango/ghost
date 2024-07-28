@@ -1,79 +1,58 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { trace, info, error, attachConsole } from '@tauri-apps/plugin-log';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Loader2 } from "lucide-react";
 import "./styles.css";
 
-type Monitor = string;
-
 type AlertType = 'error' | 'success';
-
 interface Alert {
   type: AlertType;
   message: string;
 }
 
-const MainScreen: React.FC = () => {
-  const [monitors, setMonitors] = useState<Monitor[]>([]);
-  const [isRecording, setIsRecording] = useState<boolean>(false);
-  const [recordingDuration, setRecordingDuration] = useState<number>(10);
-  const [alert, setAlert] = useState<Alert | null>(null);
-  const [cursorPosition, setCursorPosition] = useState<{ x: number, y: number }>({ x: 0, y: 0 });
+interface RecordingAnalysis {
+  total_duration: number;
+  total_events: number;
+  event_counts: Record<string, number>;
+  total_mouse_distance: number;
+}
 
+export default function MainScreen() {
+  const [isRecording, setIsRecording] = useState<boolean>(false);
+  const [alert, setAlert] = useState<Alert | null>(null);
+  const [analysis, setAnalysis] = useState<RecordingAnalysis | null>(null);
 
   useEffect(() => {
+    // Set theme based on system preference
+    invoke("plugin:theme|set_theme", {
+      theme: "auto",
+    });
+
     async function setupLogs() {
-      // const detach = await attachConsole();
       await attachConsole();
       trace('This is a trace message');
       info('This is an info message');
       error('This is an error message');
     }
-
     setupLogs();
 
-    async function fetchMonitors() {
-      try {
-        const monitorNames = await invoke<string[]>('get_monitors');
-        setMonitors(monitorNames);
-      } catch (error: any) {
-        // error('Failed to fetch monitors:', error);
-        error(`Failed to fetch monitors: ${error}`);
-        setAlert({ type: 'error', message: 'Failed to fetch monitors' });
-      }
-    }
-
-    fetchMonitors();
-
-    // Set up cursor position tracking
-    const intervalId = setInterval(async () => {
-      try {
-        const [x, y] = await invoke<[number, number]>('get_cursor_position');
-        setCursorPosition({ x, y });
-      } catch (error: any) {
-        error(`Failed to get cursor position: ${error}`);
-      }
-    }, 100);  // Every 100ms (10 times per second)
-
-    // Cleanup interval on component unmount
-    return () => clearInterval(intervalId);
-
-
-    // Listen for the recording_complete event
     const unlistenComplete = listen('recording_complete', (event) => {
-      info(`Recording completed: ${event.payload}`)
+      info(`Recording completed: ${event.payload}`);
       setAlert({ type: 'success', message: `Recording completed successfully. Saved to ${event.payload}` });
       setIsRecording(false);
+      analyzeRecording();
     });
 
-    // Listen for the recording_error event
     const unlistenError = listen('recording_error', (event) => {
       error(`Recording error: ${event.payload}`);
       setAlert({ type: 'error', message: `Recording failed: ${event.payload}` });
       setIsRecording(false);
     });
 
-    // Cleanup listeners on component unmount
     return () => {
       unlistenComplete.then(f => f());
       unlistenError.then(f => f());
@@ -83,10 +62,9 @@ const MainScreen: React.FC = () => {
   const startRecording = async () => {
     try {
       setIsRecording(true);
-      setAlert(null); // Clear any previous alerts
-      await invoke('start_recording', { duration: recordingDuration });
-      // The recording process has started, but we don't know if it's successful yet.
-      // We'll wait for the recording_complete or recording_error event.
+      setAlert(null);
+      setAnalysis(null);
+      await invoke('start_recording');
     } catch (error: any) {
       error(`Failed to start recording: ${error}`);
       setAlert({ type: 'error', message: 'Failed to start recording' });
@@ -94,82 +72,103 @@ const MainScreen: React.FC = () => {
     }
   };
 
-  return (
-    <div style={{
-      minHeight: '100vh',
-      backgroundColor: 'white',
-      color: '#1a202c',
-      padding: '2rem',
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center'
-    }}>
-      <div style={{
-        maxWidth: '64rem',
-        width: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        textAlign: 'center'
-      }}>
-        <h1>Welcome to i.inc!</h1>
-        <h2>Monitor Name: {monitors}</h2>
-        <h3>Cursor Position: ({cursorPosition.x.toFixed(2)}, {cursorPosition.y.toFixed(2)})</h3>
+  const stopRecording = async () => {
+    try {
+      await invoke('stop_recording');
+      // The recording_complete event will handle the rest
+    } catch (error: any) {
+      error(`Failed to stop recording: ${error}`);
+      setAlert({ type: 'error', message: 'Failed to stop recording' });
+      setIsRecording(false);
+    }
+  };
 
-        <div style={{ display: 'flex', alignItems: 'center', marginBottom: '3rem' }}>
-          <img src="/logo.svg" alt="i.inc logo" style={{ width: '2rem', height: '2rem' }} />
-          <h1 style={{ fontSize: '1.875rem', fontWeight: 'bold', marginLeft: '1rem' }}>i.inc Desktop Event Recorder</h1>
+  const analyzeRecording = async () => {
+    try {
+      const result = await invoke('analyze_recording');
+      setAnalysis(result as RecordingAnalysis);
+    } catch (error: any) {
+      error(`Failed to analyze recording: ${error}`);
+      setAlert({ type: 'error', message: 'Failed to analyze recording' });
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-white dark:bg-gray-900 text-black dark:text-white p-8 flex flex-col items-center justify-start">
+      <div className="max-w-4xl w-full flex flex-col items-center text-center">
+        <div className="flex items-center mb-12">
+          <img src="/logo.svg" alt="i.inc logo" className="w-16 h-16" />
+          <h1 className="text-4xl font-bold ml-4">i.inc Desktop Event Recorder</h1>
         </div>
 
         {alert && (
-          <div style={{
-            padding: '1rem',
-            marginBottom: '1.5rem',
-            borderRadius: '0.375rem',
-            backgroundColor: alert.type === 'error' ? '#fee2e2' : '#d1fae5',
-            color: alert.type === 'error' ? '#dc2626' : '#047857'
-          }}>
-            {alert.message}
-          </div>
+          <Alert variant={alert.type === 'error' ? "destructive" : "default"} className="mb-6">
+            <AlertDescription>{alert.message}</AlertDescription>
+          </Alert>
         )}
 
-        <div style={{ marginBottom: '2rem' }}>
-          <h3 style={{ fontSize: '1.25rem', fontWeight: 'semibold', marginBottom: '1rem' }}>Recording Settings</h3>
-          <div style={{ display: 'flex', alignItems: 'center' }}>
-            <label htmlFor="duration" style={{ marginRight: '1rem' }}>Duration (seconds):</label>
-            <input
-              id="duration"
-              type="number"
-              value={recordingDuration}
-              onChange={(e) => setRecordingDuration(parseInt(e.target.value))}
-              style={{
-                border: '1px solid #d1d5db',
-                borderRadius: '0.25rem',
-                padding: '0.25rem 0.5rem',
-                width: '5rem'
-              }}
-            />
-          </div>
-        </div>
+        <Card className="w-full mb-8 bg-white dark:bg-gray-800">
+          <CardHeader>
+            <CardTitle>Recording Controls</CardTitle>
+          </CardHeader>
+          <CardContent className="flex justify-center space-x-4">
+            <Button
+              onClick={startRecording}
+              disabled={isRecording}
+              className="bg-blue-500 hover:bg-blue-600 text-white"
+            >
+              {isRecording ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Recording...
+                </>
+              ) : (
+                'Start Recording'
+              )}
+            </Button>
+            <Button
+              onClick={stopRecording}
+              disabled={!isRecording}
+              variant="outline"
+              className="border-blue-500 text-blue-500 hover:bg-blue-100 dark:hover:bg-blue-900"
+            >
+              Stop Recording
+            </Button>
+          </CardContent>
+        </Card>
 
-        <button
-          onClick={startRecording}
-          disabled={isRecording}
-          style={{
-            backgroundColor: '#1a202c',
-            color: 'white',
-            padding: '0.5rem 1.5rem',
-            borderRadius: '0.25rem',
-            cursor: isRecording ? 'not-allowed' : 'pointer',
-            opacity: isRecording ? 0.5 : 1
-          }}
-        >
-          {isRecording ? 'Recording...' : 'Start Recording'}
-        </button>
+        {analysis && (
+          <Card className="w-full bg-white dark:bg-gray-800">
+            <CardHeader>
+              <CardTitle>Recording Analysis</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <h3 className="font-semibold">Total Duration</h3>
+                  <p>{analysis.total_duration} seconds</p>
+                </div>
+                <div>
+                  <h3 className="font-semibold">Total Events</h3>
+                  <p>{analysis.total_events}</p>
+                </div>
+                <div>
+                  <h3 className="font-semibold">Mouse Distance</h3>
+                  <p>{analysis.total_mouse_distance.toFixed(2)} pixels</p>
+                </div>
+                <div>
+                  <h3 className="font-semibold">Event Breakdown</h3>
+                  <ul className="list-disc list-inside">
+                    {Object.entries(analysis.event_counts).map(([event, count]) => (
+                      <li key={event}>{event}: {count}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </div>
     </div>
   );
-};
-
-export default MainScreen;
+}

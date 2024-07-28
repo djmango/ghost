@@ -4,27 +4,13 @@
 mod recording;
 
 use log::LevelFilter;
-use tauri::{AppHandle, Manager, Window};
+use recording::recording::Recorder;
+use std::sync::Arc;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_log::{Target, TargetKind};
+use tokio::sync::Mutex;
 
-use crate::recording::start_recording;
-
-#[tauri::command]
-fn get_monitors(window: Window) -> String {
-    window
-        .current_monitor()
-        .unwrap()
-        .unwrap()
-        .name()
-        .unwrap()
-        .to_string()
-}
-
-#[tauri::command]
-fn get_cursor_position(window: Window) -> (f64, f64) {
-    let pos = window.cursor_position().unwrap();
-    (pos.x as f64, pos.y as f64)
-}
+use crate::recording::{analyze_recording, start_recording, stop_recording};
 
 fn show_window(app: &AppHandle) {
     let windows = app.webview_windows();
@@ -38,14 +24,19 @@ fn show_window(app: &AppHandle) {
 }
 
 fn main() {
-    // tracing_subscriber::fmt::init();
+    let recorder_state = Arc::new(Mutex::new(Recorder::new()));
+
+    let mut ctx = tauri::generate_context!();
     tauri::Builder::default()
+        // .manage(Arc::new(Mutex::new(recording::Recorder::new())))
+        .manage(recorder_state)
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             let _ = show_window(app);
         }))
+        .plugin(tauri_plugin_theme::init(ctx.config_mut()))
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(LevelFilter::Debug)
@@ -57,10 +48,10 @@ fn main() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
-            get_monitors,
-            get_cursor_position,
-            start_recording
+            start_recording,
+            stop_recording,
+            analyze_recording
         ])
-        .run(tauri::generate_context!())
+        .run(ctx)
         .expect("error while running tauri application");
 }

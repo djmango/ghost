@@ -15,15 +15,15 @@ anyhow = "1.0.86"
 chrono = "0.4.23"
 csv = "1.2.1"
 ffmpeg-sidecar = "1.1.0"
-image = "0.25.2"
-imageproc = "0.25.0"
 log = "0.4.22"
 rand = "0.8.5"
+rdev = { version = "0.5.3", features = ["serde", "serialize"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.0.0-beta", features = [] }
 tauri-plugin-log = "2.0.0-beta.9"
 tauri-plugin-shell = "2.0.0-beta"
+tauri-plugin-theme = "0.4.1"
 tokio = "1.39.2"
 uuid = { version = "1.10.0", features = ["serde", "v4"] }
 
