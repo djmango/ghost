@@ -1,15 +1,16 @@
 use chrono::Utc;
 use csv::Writer;
-use ffmpeg_sidecar::{command::FfmpegCommand, ffprobe::ffprobe_path};
+use ffmpeg_sidecar::command::FfmpegCommand;
 use image::{GenericImageView, Rgba};
 use imageproc::drawing::{draw_filled_circle_mut, draw_filled_rect_mut};
 use imageproc::rect::Rect;
 use log::{debug, error, info, warn};
 use rand::seq::SliceRandom;
 use std::fs;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{Emitter, Window};
 use tokio::task;
 use uuid::Uuid;
@@ -47,126 +48,90 @@ impl CursorTracker {
     }
 
     fn start_recording(&mut self, duration: u64, window: Window) {
-        let start_time = Instant::now();
         let session_id = Uuid::new_v4();
-
         info!("Starting recording for session: {}", session_id);
-        // ffmpeg -f avfoundation -list_devices true -i ""
-        // let _ = FfmpegCommand::new()
-        //     .format("avfoundation")
-        //     .args(["-list_devices", "true"])
-        //     .input("\"\"")
-        //     .spawn()
-        //     .unwrap()
-        //     .iter()
-        //     .unwrap()
-        //     .for_each(|event: FfmpegEvent| match event {
-        //         FfmpegEvent::Log(_level, msg) => {
-        //             info!("[ffmpeg] {}", msg);
-        //         }
-        //         _ => {}
-        //     });
+
+        let video_path = self.video_path();
+        let timestamp_path = self.timestamp_path();
 
         let mut recording_proc = FfmpegCommand::new()
-            .format("avfoundation")
-            .args(&["-capture_cursor", "1", "-capture_mouse_clicks", "1"])
-            .input("1:0")
+            .args(&["-f", "avfoundation"]) // Use avfoundation for macOS
+            .args(&["-capture_cursor", "1"])
+            .args(&["-capture_mouse_clicks", "1"])
             .duration(Duration::from_secs(duration).as_secs().to_string())
-            .preset("ultrafast")
-            .output(self.video_path().as_path().to_str().unwrap())
+            .args(&["-framerate", "30"])
+            .args(&["-i", "1:none"]) // Adjust this for your specific input device
+            .args(&[
+                "-filter_complex",
+                "settb=1/1000,setpts='RTCTIME/1000-1500000000000',mpdecimate,split=2[out][ts]",
+            ])
+            .args(&["-map", "[out]"])
+            .args(&["-vcodec", "libx264"])
+            .args(&["-pix_fmt", "yuv420p"])
+            .args(&["-preset", "fast"])
+            .args(&["-crf", "0"])
+            .args(&["-threads", "0"])
+            .output(video_path.to_str().unwrap())
+            .args(&["-map", "[ts]"])
+            .args(&["-f", "mkvtimestamp_v2"])
+            .output(timestamp_path.to_str().unwrap())
+            .args(&["-vsync", "0"])
             .print_command()
             .spawn()
             .unwrap();
 
-        debug!("Spawned in {} seconds", start_time.elapsed().as_millis());
-
-        // Collect cursor data while FFmpeg is recording
+        // Start collecting cursor data
+        let start_time = Instant::now();
         while start_time.elapsed() < Duration::from_secs(duration) {
             if let Ok(pos) = window.cursor_position() {
-                let timestamp = Utc::now();
+                let current_timestamp = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
 
                 self.data.push(CursorData {
                     session_id,
-                    timestamp: timestamp.timestamp_millis() as u64,
+                    timestamp: current_timestamp,
                     x: pos.x as i32,
                     y: pos.y as i32,
                 });
 
-                std::thread::sleep(Duration::from_millis(33)); // ~30 FPS
+                std::thread::sleep(Duration::from_millis(10)); // ~100Hz
             }
         }
 
         recording_proc
             .wait()
             .expect("Failed to wait for FFmpeg process");
-
         info!("Recording complete");
-    }
-
-    fn get_video_duration(&self) -> f64 {
-        let output = Command::new(ffprobe_path())
-            .args(&[
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                self.video_path().to_str().unwrap(),
-            ])
-            .output()
-            .expect("Failed to execute ffprobe");
-
-        info!("FFprobe output: {:?}", &output);
-
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse::<f64>()
-            .expect("Failed to parse video duration")
     }
 
     fn extract_relevant_frames(&mut self) {
         let frames_dir = self.frames_dir();
         fs::create_dir_all(&frames_dir).expect("Failed to create frames directory");
 
-        // Sort the data by timestamp to ensure we process in order
-        self.data.sort_by_key(|d| d.timestamp);
-
-        let video_duration_ms = (self.get_video_duration() * 1000.0) as u64;
         let video_path = self.video_path();
+        let timestamp_path = self.timestamp_path();
 
-        // Get the start timestamp (timestamp of the first frame)
-        let start_timestamp = self.data.first().map(|d| d.timestamp).unwrap_or(0);
+        // Read timestamps from the file
+        let timestamps = self.read_timestamps(timestamp_path);
 
-        for data in &mut self.data {
-            // Calculate relative time in milliseconds
-            let relative_time_ms = data.timestamp.saturating_sub(start_timestamp);
-
-            if relative_time_ms > video_duration_ms {
-                warn!(
-                    "Relative time {}ms is beyond video duration, skipping",
-                    relative_time_ms
-                );
-                continue;
+        for (index, data) in self.data.iter().enumerate() {
+            if index >= timestamps.len() {
+                warn!("More cursor data than video frames, stopping extraction");
+                break;
             }
 
-            let output_path = frames_dir.join(format!("frame_{}.jpg", data.timestamp));
-            let time_str = format!("{}ms", relative_time_ms); // Use exact milliseconds
+            let frame_timestamp = timestamps[index] + 1500000000000; // Add back the subtracted value
+            let output_path = frames_dir.join(format!("frame_{}.jpg", frame_timestamp));
 
             let status = FfmpegCommand::new()
-                .args(&[
-                    "-ss",
-                    &time_str,
-                    "-i",
-                    video_path.to_str().unwrap(),
-                    "-vframes",
-                    "1",
-                    "-q:v",
-                    "3",
-                    "-pix_fmt",
-                    "yuvj420p",
-                    output_path.to_str().unwrap(),
-                ])
+                .args(&["-i", video_path.to_str().unwrap()])
+                .args(&["-vf", &format!("select='eq(n,{})'", index)])
+                .args(&["-vframes", "1"])
+                .args(&["-q:v", "3"])
+                .args(&["-pix_fmt", "yuvj420p"])
+                .output(output_path.to_str().unwrap())
                 .print_command()
                 .spawn()
                 .expect("Failed to execute FFmpeg")
@@ -174,20 +139,69 @@ impl CursorTracker {
 
             if status.is_ok() {
                 info!(
-                    "Extracted frame at relative time {}ms, file: {:?}",
-                    relative_time_ms, output_path
+                    "Extracted frame at timestamp {}, file: {:?}",
+                    frame_timestamp, output_path
                 );
             } else {
-                error!(
-                    "Failed to extract frame at relative time {}ms",
-                    relative_time_ms
-                );
+                error!("Failed to extract frame at timestamp {}", frame_timestamp);
             }
+        }
+    }
+
+    fn read_timestamps(&self, path: PathBuf) -> Vec<u64> {
+        let file = File::open(path).expect("Failed to open timestamp file");
+        let reader = BufReader::new(file);
+
+        reader
+            .lines()
+            .skip(1) // Skip the header line
+            .filter_map(|line| line.ok()?.parse::<u64>().ok())
+            .collect()
+    }
+    fn create_visualization_video(&self) {
+        let frames_dir = self.frames_dir();
+        let temp_dir = self.session_dir.join("temp_frames");
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp frames directory");
+
+        // Load a system font
+
+        for (index, cursor_data) in self.data.iter().enumerate() {
+            let frame_path = frames_dir.join(format!("frame_{}.jpg", cursor_data.timestamp));
+            let mut img = image::open(&frame_path).expect("Failed to open image");
+
+            // Draw cursor position
+            draw_filled_circle_mut(
+                &mut img,
+                (cursor_data.x, cursor_data.y),
+                5,
+                Rgba([255, 0, 0, 255]),
+            );
+
+            // Draw timestamp
+            // let text = format!("Frame: {}, Timestamp: {}", index, cursor_data.timestamp);
+            // let size = 20.0;
+            // draw_text_mut(
+            //     &mut img,
+            //     Rgba([255, 255, 255, 255]),
+            //     10,
+            //     10,
+            //     PxScale::from(size),
+            //     &font.into(),
+            //     &text,
+            // );
+
+            // Save the modified frame
+            let temp_frame_path = temp_dir.join(format!("frame_{:05}.jpg", index));
+            img.save(&temp_frame_path).expect("Failed to save frame");
         }
     }
 
     fn video_path(&self) -> PathBuf {
         self.session_dir.join("recording.mkv")
+    }
+
+    fn timestamp_path(&self) -> PathBuf {
+        self.session_dir.join("timestamps.txt")
     }
 
     fn frames_dir(&self) -> PathBuf {
@@ -219,158 +233,350 @@ impl CursorTracker {
         writer.flush().expect("Failed to flush CSV writer");
     }
 
-    fn visualize(&self, num_samples: usize) {
-        let mut rng = rand::thread_rng();
-        let samples: Vec<&CursorData> = self.data.choose_multiple(&mut rng, num_samples).collect();
+    fn align_cursor_data_with_frames(&mut self) {
+        let frames_dir = self.frames_dir();
 
-        for (i, sample) in samples.iter().enumerate() {
-            let full_frame_path = self
-                .frames_dir()
-                .join(format!("frame_{}.jpg", sample.timestamp));
+        // Get all frame timestamps
+        let mut frame_timestamps: Vec<u64> = fs::read_dir(&frames_dir)
+            .expect("Failed to read frames directory")
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.is_file() && path.extension()? == "jpg" {
+                    let filename = path.file_name()?.to_str()?;
+                    let timestamp = filename.strip_prefix("frame_")?.strip_suffix(".jpg")?;
+                    timestamp.parse::<u64>().ok()
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-            if !full_frame_path.exists() {
-                info!(
-                    "Warning: File does not exist at path: {:?}",
-                    full_frame_path
-                );
-                continue;
+        frame_timestamps.sort_unstable();
+
+        // Sort cursor data by timestamp
+        self.data.sort_by_key(|d| d.timestamp);
+
+        let mut aligned_data = Vec::new();
+        let mut cursor_index = 0;
+
+        for (frame_index, &frame_timestamp) in frame_timestamps.iter().enumerate() {
+            let mut best_diff = u64::MAX;
+            let mut best_cursor_data = None;
+
+            // Find the closest cursor data point
+            while cursor_index < self.data.len() {
+                let cursor_data = &self.data[cursor_index];
+                let diff = (frame_timestamp as i64 - cursor_data.timestamp as i64).abs() as u64;
+
+                if diff < best_diff {
+                    best_diff = diff;
+                    best_cursor_data = Some(cursor_data.clone());
+                    cursor_index += 1;
+                } else if cursor_data.timestamp > frame_timestamp {
+                    // We've gone too far, break out of the loop
+                    break;
+                } else {
+                    cursor_index += 1;
+                }
             }
 
-            let mut img = image::open(&full_frame_path).expect("Failed to open image");
-            let (frame_width, frame_height) = img.dimensions();
+            if let Some(mut cursor_data) = best_cursor_data {
+                cursor_data.timestamp = frame_timestamp;
+                aligned_data.push(cursor_data.clone());
 
-            // Ensure cursor coordinates are within image bounds
-            let x = sample.x.clamp(0, frame_width as i32 - 1);
-            let y = sample.y.clamp(0, frame_height as i32 - 1);
+                debug!(
+                    "Frame {}: timestamp {}, aligned with cursor timestamp {}, diff: {}ms",
+                    frame_index, frame_timestamp, cursor_data.timestamp, best_diff
+                );
+            } else {
+                warn!(
+                    "No suitable cursor data found for frame timestamp: {}",
+                    frame_timestamp
+                );
+            }
+        }
 
-            // Draw a large red rectangle at the cursor position
-            draw_filled_rect_mut(
-                &mut img,
-                Rect::at(x - 10, y - 10).of_size(20, 20),
-                Rgba([255, 0, 0, 255]),
+        info!(
+            "Aligned {} cursor data points with {} frames",
+            aligned_data.len(),
+            frame_timestamps.len()
+        );
+
+        if aligned_data.len() < frame_timestamps.len() {
+            warn!(
+                "Some frames ({}) don't have corresponding cursor data",
+                frame_timestamps.len() - aligned_data.len()
             );
+        }
 
-            // Draw a yellow circle on top of the rectangle
-            draw_filled_circle_mut(&mut img, (x, y), 5, Rgba([255, 255, 0, 255]));
+        self.data = aligned_data;
+    }
 
-            let output_path = self.session_dir.join(format!("visualized_frame_{}.png", i));
-            img.save(&output_path)
-                .expect("Failed to save visualized image");
+    fn visualize(&self, num_samples: usize) {
+        let frames_dir = self.frames_dir();
 
-            info!("Visualized frame saved to: {:?}", output_path);
+        let mut rng = rand::thread_rng();
+        let samples = self
+            .data
+            .choose_multiple(&mut rng, num_samples.min(self.data.len()));
+
+        for (i, cursor_data) in samples.enumerate() {
+            let frame_path = frames_dir.join(format!("frame_{}.jpg", cursor_data.timestamp));
+
+            if frame_path.exists() {
+                let mut img = image::open(&frame_path).expect("Failed to open image");
+                let (frame_width, frame_height) = img.dimensions();
+
+                // Ensure cursor coordinates are within image bounds
+                let x = cursor_data.x.clamp(0, frame_width as i32 - 1);
+                let y = cursor_data.y.clamp(0, frame_height as i32 - 1);
+
+                // Draw a large red rectangle at the cursor position
+                draw_filled_rect_mut(
+                    &mut img,
+                    Rect::at(x - 10, y - 10).of_size(20, 20),
+                    Rgba([255, 0, 0, 255]),
+                );
+
+                // Draw a yellow circle on top of the rectangle
+                draw_filled_circle_mut(&mut img, (x, y), 5, Rgba([255, 255, 0, 255]));
+
+                let output_path = self.session_dir.join(format!("visualized_frame_{}.jpg", i));
+                img.save(&output_path)
+                    .expect("Failed to save visualized image");
+
+                info!("Visualized frame saved to: {:?}", output_path);
+            } else {
+                warn!("Frame file not found: {:?}", frame_path);
+            }
         }
     }
 }
 
-#[tauri::command]
-pub async fn start_recording(duration: u64, window: tauri::Window) {
-    // Spawn the recording task in the background
-    task::spawn(async move {
-        ffmpeg_sidecar::download::auto_download().unwrap();
-        let mut tracker = CursorTracker::new();
-        info!("Recording for {} seconds...", duration);
-        tracker.start_recording(duration, window.clone());
-        info!("Extracting relevant frames...");
-        tracker.extract_relevant_frames();
-        tracker.save_to_csv();
-        info!("Recording saved to {:?}", tracker.session_dir);
-        tracker.visualize(5);
+impl CursorTracker {
+    fn extract_frames_and_align_cursor_data(
+        &mut self,
+        params: AlignmentParams,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let frames_dir = self.frames_dir();
+        fs::create_dir_all(&frames_dir)?;
+        let video_path = self.video_path();
+        let timestamp_path = self.timestamp_path();
 
-        // Emit an event when recording is complete
-        window
-            .emit("recording_complete", &tracker.session_dir)
-            .unwrap();
-    });
+        // Read timestamps from the file
+        let timestamps = self.read_timestamps(timestamp_path);
+
+        let mut aligned_data = Vec::new();
+        let mut frame_count = 0;
+
+        for (index, cursor_data) in self.data.iter().enumerate() {
+            if index >= timestamps.len() {
+                warn!("More cursor data than video frames, stopping extraction");
+                break;
+            }
+
+            let frame_timestamp = timestamps[index] + 1500000000000; // Add back the subtracted value
+            let adjusted_timestamp = frame_timestamp as i64 + params.time_offset;
+            let output_path = frames_dir.join(format!("frame_{}.jpg", adjusted_timestamp));
+
+            // Extract frame
+            let status = FfmpegCommand::new()
+                .args(&["-i", video_path.to_str().unwrap()])
+                .args(&["-vf", &format!("select='eq(n,{})'", index)])
+                .args(&["-vframes", "1"])
+                .args(&["-q:v", "3"])
+                .args(&["-pix_fmt", "yuvj420p"])
+                .output(output_path.to_str().unwrap())
+                .print_command()
+                .spawn()?
+                .wait()?;
+
+            if status.success() {
+                info!(
+                    "Extracted frame at timestamp {}, file: {:?}",
+                    adjusted_timestamp, output_path
+                );
+                frame_count += 1;
+
+                // Find closest cursor data
+                let closest_cursor_data = self.find_closest_cursor_data(
+                    adjusted_timestamp as u64,
+                    params.match_direction,
+                    params.tolerance,
+                );
+
+                if let Some(mut matched_cursor_data) = closest_cursor_data {
+                    let time_diff =
+                        adjusted_timestamp as i64 - matched_cursor_data.timestamp as i64;
+                    debug!(
+                        "Frame {}: timestamp {}, matched with cursor timestamp {}, diff: {}ms",
+                        index, adjusted_timestamp, matched_cursor_data.timestamp, time_diff
+                    );
+
+                    matched_cursor_data.timestamp = adjusted_timestamp as u64;
+                    aligned_data.push(matched_cursor_data);
+                } else {
+                    warn!(
+                        "No suitable cursor data found for frame timestamp: {}",
+                        adjusted_timestamp
+                    );
+                }
+            } else {
+                error!(
+                    "Failed to extract frame at timestamp {}",
+                    adjusted_timestamp
+                );
+            }
+        }
+
+        info!(
+            "Extracted {} frames and aligned {} cursor data points",
+            frame_count,
+            aligned_data.len()
+        );
+
+        if aligned_data.len() < frame_count {
+            warn!(
+                "{} frames don't have corresponding cursor data",
+                frame_count - aligned_data.len()
+            );
+        }
+
+        self.data = aligned_data;
+
+        self.print_alignment_statistics();
+
+        Ok(())
+    }
+
+    fn find_closest_cursor_data(
+        &self,
+        target_timestamp: u64,
+        direction: MatchDirection,
+        tolerance: u64,
+    ) -> Option<CursorData> {
+        let mut closest_data = None;
+        let mut min_diff = u64::MAX;
+
+        for data in &self.data {
+            let diff = match direction {
+                MatchDirection::Forward => target_timestamp.saturating_sub(data.timestamp),
+                MatchDirection::Backward => data.timestamp.saturating_sub(target_timestamp),
+                MatchDirection::Bidirectional => {
+                    (target_timestamp as i64 - data.timestamp as i64).abs() as u64
+                }
+            };
+
+            if diff < min_diff && diff <= tolerance {
+                min_diff = diff;
+                closest_data = Some(data.clone());
+            }
+
+            if direction == MatchDirection::Forward && data.timestamp > target_timestamp {
+                break;
+            }
+        }
+
+        closest_data
+    }
+
+    fn print_alignment_statistics(&self) {
+        let mut total_diff = 0i64;
+        let mut max_diff = 0i64;
+        let mut min_diff = i64::MAX;
+
+        for (i, data) in self.data.iter().enumerate() {
+            let frame_timestamp = data.timestamp;
+            let cursor_timestamp = self.data[i].timestamp;
+            let diff = frame_timestamp as i64 - cursor_timestamp as i64;
+
+            total_diff += diff;
+            max_diff = max_diff.max(diff);
+            min_diff = min_diff.min(diff);
+
+            debug!(
+                "Frame {}: Frame timestamp {}, Cursor timestamp {}, Difference: {}ms",
+                i, frame_timestamp, cursor_timestamp, diff
+            );
+        }
+
+        let avg_diff = if !self.data.is_empty() {
+            total_diff as f64 / self.data.len() as f64
+        } else {
+            0.0
+        };
+
+        info!("Alignment Statistics:");
+        info!("  Total frames: {}", self.data.len());
+        info!("  Average difference: {:.2}ms", avg_diff);
+        info!("  Maximum difference: {}ms", max_diff);
+        info!("  Minimum difference: {}ms", min_diff);
+    }
 }
 
-// fn main() {
-//     let matches = Command::new("i.inc Desktop Event (devent) Recorder")
-//         .version("1.0")
-//         .author("Invisibility Inc - Sulaiman Ghori")
-//         .about("Tracks cursor movement and captures screenshots")
-//         .subcommand(
-//             Command::new("record").about("Records cursor movement").arg(
-//                 Arg::new("duration")
-//                     .short('d')
-//                     .long("duration")
-//                     .value_name("SECONDS")
-//                     .help("Recording duration in seconds")
-//                     .default_value("10"),
-//             ),
-//         )
-//         .subcommand(
-//             Command::new("visualize")
-//                 .about("Visualizes random samples from the latest recording")
-//                 .arg(
-//                     Arg::new("samples")
-//                         .short('n')
-//                         .long("samples")
-//                         .value_name("NUMBER")
-//                         .help("Number of random samples to visualize")
-//                         .default_value("5"),
-//                 ),
-//         )
-//         .get_matches();
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MatchDirection {
+    Forward,
+    Backward,
+    Bidirectional,
+}
 
-//     match matches.subcommand() {
-//         Some(("record", record_matches)) => {
-//             let duration = record_matches
-//                 .get_one::<String>("duration")
-//                 .unwrap()
-//                 .parse()
-//                 .expect("Invalid duration");
+pub struct AlignmentParams {
+    pub time_offset: i64,
+    pub tolerance: u64,
+    pub match_direction: MatchDirection,
+}
 
-//             let mut tracker = CursorTracker::new();
-//             println!("Recording for {} seconds...", duration);
-//             tracker.start_recording(duration);
-//             println!("Extracting relevant frames...");
-//             tracker.extract_relevant_frames();
-//             tracker.save_to_csv();
-//             println!("Recording saved to {:?}", tracker.session_dir);
-//         }
-//         Some(("visualize", visualize_matches)) => {
-//             let samples = visualize_matches
-//                 .get_one::<String>("samples")
-//                 .unwrap()
-//                 .parse()
-//                 .expect("Invalid number of samples");
+#[tauri::command]
+pub async fn start_recording(duration: u64, window: tauri::Window) {
+    ffmpeg_sidecar::download::auto_download().unwrap();
+    let mut tracker = CursorTracker::new();
 
-//             // Find the latest recording directory
-//             let latest_dir = fs::read_dir("output")
-//                 .expect("Failed to read output directory")
-//                 .filter_map(|entry| {
-//                     let entry = entry.ok()?;
-//                     let path = entry.path();
-//                     if path.is_dir() {
-//                         Some(path)
-//                     } else {
-//                         None
-//                     }
-//                 })
-//                 .max_by_key(|path| path.metadata().unwrap().modified().unwrap())
-//                 .expect("No recording found");
+    info!("Recording for {} seconds...", duration);
+    let start_time = std::time::Instant::now();
+    tracker.start_recording(duration, window.clone());
+    let elapsed = start_time.elapsed();
+    info!("Recording completed in {:?}", elapsed);
 
-//             // Load the data from the CSV file
-//             let mut tracker = CursorTracker {
-//                 session_dir: latest_dir,
-//                 data: Vec::new(),
-//             };
-//             let csv_path = tracker.devent_path();
-//             let mut reader = Reader::from_path(csv_path).expect("Failed to read CSV");
+    info!(
+        "Number of cursor data points collected: {}",
+        tracker.data.len()
+    );
+    if let Some(first) = tracker.data.first() {
+        if let Some(last) = tracker.data.last() {
+            info!(
+                "Cursor data time range: {} to {} ({} ms)",
+                first.timestamp,
+                last.timestamp,
+                last.timestamp - first.timestamp
+            );
+        }
+    }
 
-//             for result in reader.records() {
-//                 let record = result.expect("Failed to read CSV record");
-//                 tracker.data.push(CursorData {
-//                     timestamp: record[0].to_string(),
-//                     x: record[1].parse().unwrap(),
-//                     y: record[2].parse().unwrap(),
-//                     frame_path: Some(record[3].to_string()),
-//                 });
-//             }
+    info!("Extracting relevant frames...");
+    // tracker.extract_relevant_frames();
 
-//             println!("Visualizing {} random samples...", samples);
-//             tracker.visualize(samples);
-//         }
-//         _ => println!("Please specify a valid subcommand. Use --help for more information."),
-//     }
-// }
+    // info!("Aligning cursor data with frames...");
+    // tracker.align_cursor_data_with_frames();
+
+    let params = AlignmentParams {
+        time_offset: -50, // Adjust if needed
+        tolerance: 100,   // 100ms tolerance
+        match_direction: MatchDirection::Forward,
+    };
+
+    _ = tracker.extract_frames_and_align_cursor_data(params);
+
+    tracker.save_to_csv();
+    info!("Recording saved to {:?}", tracker.session_dir);
+    // tracker.visualize(5);
+
+    info!("Creating visualization video...");
+    tracker.create_visualization_video();
+    info!("Visualization video created");
+
+    window
+        .emit("recording_complete", &tracker.session_dir)
+        .unwrap();
+}
