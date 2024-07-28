@@ -3,15 +3,17 @@ use csv::Writer;
 use ffmpeg_sidecar::child::FfmpegChild;
 use ffmpeg_sidecar::command::FfmpegCommand;
 use log::{error, info, warn};
-use rdev::{listen, Button, Event, EventType, Key};
+use rdev::{listen, Event, EventType};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tauri::{Manager, State, Window};
-use tokio::sync::Mutex;
+use tauri::Emitter;
+use tauri::{AppHandle, Manager, State, Window};
+use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 // Constants
@@ -78,11 +80,7 @@ impl RecordingSession {
         writer.write_record(&["timestamp", "event_type", "details", "mouse_x", "mouse_y"])?;
 
         for event in &self.events {
-            let event_type = match event.event.event_type {
-                EventType::KeyPress(Key::Unknown(k)) => format!("KeyPress(Unknown({}))", k),
-                EventType::KeyRelease(Key::Unknown(k)) => format!("KeyRelease(Unknown({}))", k),
-                _ => format!("{:?}", event.event.event_type),
-            };
+            let event_type = format!("{:?}", event.event.event_type);
             let details = match event.event.event_type {
                 EventType::KeyPress(key) | EventType::KeyRelease(key) => format!("{:?}", key),
                 EventType::ButtonPress(button) | EventType::ButtonRelease(button) => {
@@ -107,28 +105,42 @@ impl RecordingSession {
     }
 }
 
-pub struct Recorder {
-    session: Arc<Mutex<RecordingSession>>,
-    ffmpeg_process: Option<FfmpegChild>,
+pub struct RecorderState {
+    session: Arc<RwLock<Option<RecordingSession>>>,
+    ffmpeg_process: Arc<Mutex<Option<FfmpegChild>>>,
+    frame_capture_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    event_capture_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
-impl Recorder {
+impl RecorderState {
     pub fn new() -> Self {
-        Recorder {
-            session: Arc::new(Mutex::new(RecordingSession::new())),
-            ffmpeg_process: None,
+        RecorderState {
+            session: Arc::new(RwLock::new(None)),
+            ffmpeg_process: Arc::new(Mutex::new(None)),
+            frame_capture_handle: Arc::new(Mutex::new(None)),
+            event_capture_handle: Arc::new(Mutex::new(None)),
         }
     }
 
     async fn start_recording(
-        &mut self,
-        window: Window,
+        &self,
+        app_handle: AppHandle,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let session = self.session.clone();
+        let mut session_guard = self.session.write().await;
+        if session_guard.is_some() {
+            return Err("Recording is already in progress".into());
+        }
+        *session_guard = Some(RecordingSession::new());
+        let session_clone = self.session.clone();
+        drop(session_guard); // Release the write lock
 
         // Start FFmpeg process
-        let output_path = session.lock().await.output_dir.join("recording.mkv");
-        self.ffmpeg_process = Some(
+        let output_path = {
+            let session = self.session.read().await;
+            session.as_ref().unwrap().output_dir.join("recording.mkv")
+        };
+        let mut ffmpeg_process = self.ffmpeg_process.lock().await;
+        *ffmpeg_process = Some(
             FfmpegCommand::new()
                 .args(&["-f", "avfoundation"])
                 .args(&["-capture_cursor", "1"])
@@ -142,88 +154,60 @@ impl Recorder {
                 .spawn()?,
         );
 
-        // Start frame capture thread
-        let frame_session = session.clone();
-        tokio::spawn(async move {
-            let mut frame_count = 0;
-            loop {
-                let frame_path = frame_session
-                    .lock()
-                    .await
-                    .output_dir
-                    .join(format!("frame_{:05}.jpg", frame_count));
-                let timestamp = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
+        // Start frame capture task
+        let frame_capture_handle = tokio::spawn(frame_capture_task(session_clone.clone()));
+        let mut frame_handle = self.frame_capture_handle.lock().await;
+        *frame_handle = Some(frame_capture_handle);
 
-                // Capture frame using FFmpeg
-                if FfmpegCommand::new()
-                    .args(&["-f", "avfoundation"])
-                    .args(&["-framerate", "1"])
-                    .args(&["-i", "1:none"])
-                    .args(&["-vframes", "1"])
-                    .args(&["-q:v", "2"])
-                    .output(frame_path.to_str().unwrap())
-                    .spawn()
-                    .and_then(|mut child| child.wait())
-                    .is_ok()
-                {
-                    frame_session.lock().await.add_frame(Frame {
-                        timestamp,
-                        path: frame_path,
-                    });
-                    frame_count += 1;
-                }
+        // Start event capture task
+        let event_capture_handle = tokio::spawn(event_capture_task(session_clone));
+        let mut event_handle = self.event_capture_handle.lock().await;
+        *event_handle = Some(event_capture_handle);
 
-                tokio::time::sleep(FRAME_INTERVAL).await;
-            }
-        });
-
-        // Start event listening thread
-        let event_session = session.clone();
-        std::thread::spawn(move || {
-            let mut last_mouse_pos = (0.0, 0.0);
-            if let Err(error) = listen(move |event| {
-                let timestamp = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
-
-                // Update last known mouse position if this is a mouse move event
-                if let EventType::MouseMove { x, y } = event.event_type {
-                    last_mouse_pos = (x, y);
-                }
-
-                let recording_event = RecordingEvent {
-                    timestamp,
-                    event: event.clone(),
-                    mouse_x: last_mouse_pos.0,
-                    mouse_y: last_mouse_pos.1,
-                };
-
-                let event_session = event_session.clone();
-                tokio::runtime::Runtime::new().unwrap().block_on(async {
-                    event_session.lock().await.add_event(recording_event);
-                });
-            }) {
-                error!("Error: {:?}", error);
-            }
-        });
+        info!("Recording started successfully");
+        app_handle
+            .emit("recording_started", ())
+            .map_err(|e| e.to_string())?;
 
         Ok(())
     }
 
-    async fn stop_recording(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(mut process) = self.ffmpeg_process.take() {
+    async fn stop_recording(
+        &self,
+        app_handle: AppHandle,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Stop FFmpeg process
+        let mut ffmpeg_process = self.ffmpeg_process.lock().await;
+        if let Some(mut process) = ffmpeg_process.take() {
             process.kill()?;
             process.wait()?;
         }
 
-        let mut session = self.session.lock().await;
-        session.save_events_to_csv().await?;
+        // Stop frame capture task
+        let mut frame_handle = self.frame_capture_handle.lock().await;
+        if let Some(handle) = frame_handle.take() {
+            handle.abort();
+        }
 
-        info!("Recording saved to {:?}", session.output_dir);
+        // Stop event capture task
+        let mut event_handle = self.event_capture_handle.lock().await;
+        if let Some(handle) = event_handle.take() {
+            handle.abort();
+        }
+
+        // Save events to CSV
+        let mut session_guard = self.session.write().await;
+        if let Some(s) = session_guard.as_mut() {
+            s.save_events_to_csv().await?;
+            info!("Recording saved to {:?}", s.output_dir);
+            app_handle
+                .emit("recording_complete", s.output_dir.to_str())
+                .map_err(|e| e.to_string())?;
+        } else {
+            return Err("No active recording session".into());
+        }
+
+        *session_guard = None;
 
         Ok(())
     }
@@ -231,7 +215,11 @@ impl Recorder {
     async fn analyze_recording(
         &self,
     ) -> Result<RecordingAnalysis, Box<dyn std::error::Error + Send + Sync>> {
-        let session = self.session.lock().await;
+        let session_guard = self.session.read().await;
+        let session = session_guard
+            .as_ref()
+            .ok_or("No recording session available")?;
+
         let total_duration = SystemTime::now().duration_since(session.start_time)?;
 
         let mut event_counts = HashMap::new();
@@ -260,6 +248,91 @@ impl Recorder {
     }
 }
 
+async fn frame_capture_task(session: Arc<RwLock<Option<RecordingSession>>>) {
+    let mut frame_count = 0;
+    loop {
+        tokio::time::sleep(FRAME_INTERVAL).await;
+
+        let session_guard = session.read().await;
+        if session_guard.is_none() {
+            break;
+        }
+        let session_ref = session_guard.as_ref().unwrap();
+
+        let frame_path = session_ref
+            .output_dir
+            .join(format!("frame_{:05}.jpg", frame_count));
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        // Capture frame using FFmpeg
+        if FfmpegCommand::new()
+            .args(&["-f", "avfoundation"])
+            .args(&["-framerate", "1"])
+            .args(&["-i", "1:none"])
+            .args(&["-vframes", "1"])
+            .args(&["-q:v", "2"])
+            .output(frame_path.to_str().unwrap())
+            .spawn()
+            .and_then(|mut child| child.wait())
+            .is_ok()
+        {
+            drop(session_guard); // Release the read lock before acquiring the write lock
+            let mut session_guard = session.write().await;
+            if let Some(s) = session_guard.as_mut() {
+                s.add_frame(Frame {
+                    timestamp,
+                    path: frame_path,
+                });
+                frame_count += 1;
+            }
+        }
+    }
+}
+
+async fn event_capture_task(session: Arc<RwLock<Option<RecordingSession>>>) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+
+    // Spawn a thread for event listening
+    std::thread::spawn(move || {
+        let mut last_mouse_pos = (0.0, 0.0);
+        if let Err(error) = listen(move |event| {
+            let timestamp = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+
+            // Update last known mouse position if this is a mouse move event
+            if let EventType::MouseMove { x, y } = event.event_type {
+                last_mouse_pos = (x, y);
+            }
+
+            let recording_event = RecordingEvent {
+                timestamp,
+                event: event.clone(),
+                mouse_x: last_mouse_pos.0,
+                mouse_y: last_mouse_pos.1,
+            };
+
+            let _ = tx.blocking_send(recording_event);
+        }) {
+            error!("Error in event listener: {:?}", error);
+        }
+    });
+
+    // Process events in the async task
+    while let Some(event) = rx.recv().await {
+        let mut session_guard = session.write().await;
+        if let Some(s) = session_guard.as_mut() {
+            s.add_event(event);
+        } else {
+            break;
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct RecordingAnalysis {
     total_duration: u64,
@@ -269,28 +342,30 @@ pub struct RecordingAnalysis {
 }
 
 #[tauri::command]
-pub async fn start_recording(window: Window, app_handle: tauri::AppHandle) -> Result<(), String> {
-    let recorder_state: State<Arc<Mutex<Recorder>>> = app_handle.state();
-    let mut recorder = recorder_state.lock().await;
-    recorder
-        .start_recording(window.clone())
+pub async fn start_recording(
+    app_handle: AppHandle,
+    state: State<'_, Arc<RecorderState>>,
+) -> Result<(), String> {
+    state
+        .start_recording(app_handle)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn stop_recording(app_handle: tauri::AppHandle) -> Result<(), String> {
-    let recorder_state: State<Arc<Mutex<Recorder>>> = app_handle.state();
-    let mut recorder = recorder_state.lock().await;
-    recorder.stop_recording().await.map_err(|e| e.to_string())
+pub async fn stop_recording(
+    app_handle: AppHandle,
+    state: State<'_, Arc<RecorderState>>,
+) -> Result<(), String> {
+    state
+        .stop_recording(app_handle)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn analyze_recording(app_handle: tauri::AppHandle) -> Result<RecordingAnalysis, String> {
-    let recorder_state: State<Arc<Mutex<Recorder>>> = app_handle.state();
-    let recorder = recorder_state.lock().await;
-    recorder
-        .analyze_recording()
-        .await
-        .map_err(|e| e.to_string())
+pub async fn analyze_recording(
+    state: State<'_, Arc<RecorderState>>,
+) -> Result<RecordingAnalysis, String> {
+    state.analyze_recording().await.map_err(|e| e.to_string())
 }
