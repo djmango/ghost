@@ -20,6 +20,12 @@ fn get_monitors(window: Window) -> String {
         .to_string()
 }
 
+#[tauri::command]
+fn get_cursor_position(window: Window) -> (f64, f64) {
+    let pos = window.cursor_position().unwrap();
+    (pos.x as f64, pos.y as f64)
+}
+
 fn show_window(app: &AppHandle) {
     let windows = app.webview_windows();
 
@@ -50,7 +56,11 @@ fn main() {
                 ])
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![get_monitors, start_recording])
+        .invoke_handler(tauri::generate_handler![
+            get_monitors,
+            get_cursor_position,
+            start_recording
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

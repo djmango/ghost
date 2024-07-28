@@ -18,6 +18,7 @@ const MainScreen: React.FC = () => {
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [recordingDuration, setRecordingDuration] = useState<number>(10);
   const [alert, setAlert] = useState<Alert | null>(null);
+  const [cursorPosition, setCursorPosition] = useState<{ x: number, y: number }>({ x: 0, y: 0 });
 
 
   useEffect(() => {
@@ -43,6 +44,19 @@ const MainScreen: React.FC = () => {
     }
 
     fetchMonitors();
+
+    // Set up cursor position tracking
+    const intervalId = setInterval(async () => {
+      try {
+        const [x, y] = await invoke<[number, number]>('get_cursor_position');
+        setCursorPosition({ x, y });
+      } catch (error: any) {
+        error(`Failed to get cursor position: ${error}`);
+      }
+    }, 100);  // Every 100ms (10 times per second)
+
+    // Cleanup interval on component unmount
+    return () => clearInterval(intervalId);
 
 
     // Listen for the recording_complete event
@@ -101,6 +115,7 @@ const MainScreen: React.FC = () => {
       }}>
         <h1>Welcome to i.inc!</h1>
         <h2>Monitor Name: {monitors}</h2>
+        <h3>Cursor Position: ({cursorPosition.x.toFixed(2)}, {cursorPosition.y.toFixed(2)})</h3>
 
         <div style={{ display: 'flex', alignItems: 'center', marginBottom: '3rem' }}>
           <img src="/logo.svg" alt="i.inc logo" style={{ width: '2rem', height: '2rem' }} />
