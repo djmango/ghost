@@ -1,25 +1,25 @@
 use chrono::Utc;
 use csv::Writer;
-use image::ImageDecoder;
-use image::Rgba;
+use ffmpeg_sidecar::{command::FfmpegCommand, event::FfmpegEvent};
+use image::{GenericImageView, Rgba};
 use imageproc::drawing::{draw_filled_circle_mut, draw_filled_rect_mut};
 use imageproc::rect::Rect;
+use log::{debug, error, info, warn};
 use rand::seq::SliceRandom;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Window};
 use tokio::task;
-use tracing::info;
 use uuid::Uuid;
-use xcap::Monitor;
 
+#[derive(Debug)]
 struct CursorTracker {
     session_dir: PathBuf,
     data: Vec<CursorData>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct CursorData {
     session_id: Uuid,
     timestamp: String,
@@ -41,39 +41,95 @@ impl CursorTracker {
     }
 
     fn start_recording(&mut self, duration: u64, window: Window) {
-        let monitor = Monitor::all().unwrap().iter().next().unwrap().clone();
+        let monitor = window.current_monitor().unwrap().unwrap();
         let session_id = Uuid::new_v4();
         let scale_factor = monitor.scale_factor();
         let start_time = Instant::now();
-        let monitors = Monitor::all().unwrap();
-        info!("Recording on monitor: {:?}", monitors);
 
         // Ensure the frames directory exists
         fs::create_dir_all(self.frames_dir()).expect("Failed to create frames directory");
 
-        while start_time.elapsed() < Duration::from_secs(duration) {
-            let image = monitor.capture_image().unwrap();
-            let frame_path = format!("frame_{}.png", self.data.len());
-            info!("Saving frame to: {:?}", frame_path);
-            let full_frame_path = self.frames_dir().join(&frame_path);
-            image.save(&full_frame_path).expect("Failed to save frame");
+        info!("Starting recording for session: {}", session_id);
+        // ffmpeg -f avfoundation -list_devices true -i ""
+        let _ = FfmpegCommand::new()
+            .format("avfoundation")
+            .args(["-list_devices", "true"])
+            .input("\"\"")
+            .spawn()
+            .unwrap()
+            .iter()
+            .unwrap()
+            .for_each(|event: FfmpegEvent| match event {
+                FfmpegEvent::Log(_level, msg) => {
+                    info!("[ffmpeg] {}", msg);
+                }
+                _ => {}
+            });
 
-            if let Ok(pos) = window.cursor_position() {
-                let timestamp = Utc::now().format("%Y%m%d%H%M%S%.3f").to_string();
-                let scaled_x = (pos.x as f32 * scale_factor) as i32;
-                let scaled_y = (pos.y as f32 * scale_factor) as i32;
+        // ffmpeg -f avfoundation -capture_cursor 1 -capture_mouse_clicks 1 -i "1:0" output.mkv                                             │
+        let mut input = FfmpegCommand::new()
+            .format("avfoundation")
+            .duration(Duration::from_secs(duration).as_secs().to_string())
+            .args(["-capture_cursor", "1", "-capture_mouse_clicks", "1"])
+            .input("1:0")
+            .preset("ultrafast")
+            .output(
+                self.session_dir
+                    .join("output.mkv")
+                    .as_path()
+                    .to_str()
+                    .unwrap(),
+            )
+            .print_command()
+            .spawn()
+            .unwrap();
 
-                self.data.push(CursorData {
-                    session_id,
-                    timestamp,
-                    x: scaled_x,
-                    y: scaled_y,
-                    frame_path,
-                });
-            }
+        // let arg_string =
+        //     format!("-f avfoundation -capture_cursor 1 -capture_mouse_clicks 1 -i 1:0 output.mkv");
+        // let mut input = FfmpegCommand::new()
+        //     .args(arg_string.split(' '))
+        //     .print_command()
+        //     .spawn()
+        //     .unwrap();
 
-            std::thread::sleep(Duration::from_millis(33)); // ~30 FPS
-        }
+        let frames = input
+            .iter()
+            .unwrap()
+            .for_each(|event: FfmpegEvent| match event {
+                FfmpegEvent::OutputFrame(frame) => {
+                    info!("frame: {}x{}", frame.width, frame.height);
+                    let frame_path = format!("frame_{}.png", self.data.len());
+                    info!("Saving frame to: {:?}", frame_path);
+                    let full_frame_path = self.frames_dir().join(&frame_path);
+                    let image = image::load_from_memory(&frame.data)
+                        .expect("Failed to load image data")
+                        .to_rgba8();
+                    image.save(&full_frame_path).expect("Failed to save frame");
+
+                    if let Ok(pos) = window.cursor_position() {
+                        let timestamp = Utc::now().format("%Y%m%d%H%M%S%.3f").to_string();
+                        let scaled_x = (pos.x as f64 * scale_factor) as i32;
+                        let scaled_y = (pos.y as f64 * scale_factor) as i32;
+
+                        self.data.push(CursorData {
+                            session_id,
+                            timestamp,
+                            x: scaled_x,
+                            y: scaled_y,
+                            frame_path,
+                        });
+                    }
+                }
+                FfmpegEvent::Progress(progress) => {
+                    info!("Current speed: {}x", progress.speed);
+                }
+                FfmpegEvent::Log(_level, msg) => {
+                    info!("[ffmpeg] {}", msg);
+                }
+                _ => {}
+            });
+
+        info!("Recording complete");
     }
 
     fn frames_dir(&self) -> PathBuf {
@@ -150,19 +206,20 @@ impl CursorTracker {
 #[tauri::command]
 pub async fn start_recording(duration: u64, window: tauri::Window) {
     // Spawn the recording task in the background
-    task::spawn(async move {
-        let mut tracker = CursorTracker::new();
-        info!("Recording for {} seconds...", duration);
-        tracker.start_recording(duration, window.clone());
-        tracker.save_to_csv();
-        info!("Recording saved to {:?}", tracker.session_dir);
-        tracker.visualize(5);
+    // task::spawn(async move {
+    ffmpeg_sidecar::download::auto_download().unwrap();
+    let mut tracker = CursorTracker::new();
+    info!("Recording for {} seconds...", duration);
+    tracker.start_recording(duration, window.clone());
+    tracker.save_to_csv();
+    info!("Recording saved to {:?}", tracker.session_dir);
+    tracker.visualize(5);
 
-        // Emit an event when recording is complete
-        window
-            .emit("recording_complete", &tracker.session_dir)
-            .unwrap();
-    });
+    // Emit an event when recording is complete
+    window
+        .emit("recording_complete", &tracker.session_dir)
+        .unwrap();
+    // });
 }
 
 // fn main() {
