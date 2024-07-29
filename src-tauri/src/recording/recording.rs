@@ -2,7 +2,7 @@ use chrono::Utc;
 use csv::Writer;
 use ffmpeg_sidecar::child::FfmpegChild;
 use ffmpeg_sidecar::command::FfmpegCommand;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use rdev::{listen, Event, EventType};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -183,17 +183,23 @@ impl RecorderState {
             process.wait()?;
         }
 
+        debug!("Stopping recording");
+
         // Stop frame capture task
+        debug!("Stopping frame capture task");
         let mut frame_handle = self.frame_capture_handle.lock().await;
         if let Some(handle) = frame_handle.take() {
             handle.abort();
         }
+        debug!("Frame capture task stopped");
 
         // Stop event capture task
+        debug!("Stopping event capture task");
         let mut event_handle = self.event_capture_handle.lock().await;
         if let Some(handle) = event_handle.take() {
             handle.abort();
         }
+        debug!("Event capture task stopped");
 
         // Save events to CSV
         let mut session_guard = self.session.write().await;
@@ -270,6 +276,8 @@ async fn frame_capture_task(session: Arc<RwLock<Option<RecordingSession>>>) {
         // Capture frame using FFmpeg
         if FfmpegCommand::new()
             .args(&["-f", "avfoundation"])
+            .args(&["-capture_cursor", "1"])
+            .args(&["-capture_mouse_clicks", "1"])
             .args(&["-framerate", "1"])
             .args(&["-i", "1:none"])
             .args(&["-vframes", "1"])
@@ -307,7 +315,12 @@ async fn event_capture_task(session: Arc<RwLock<Option<RecordingSession>>>) {
             // Update last known mouse position if this is a mouse move event
             if let EventType::MouseMove { x, y } = event.event_type {
                 last_mouse_pos = (x, y);
+                info!("Mouse position: ({}, {})", x, y);
+                // Do not emit MouseMove events
+                return;
             }
+
+            // Drag events are not handled properly
 
             let recording_event = RecordingEvent {
                 timestamp,
@@ -316,6 +329,9 @@ async fn event_capture_task(session: Arc<RwLock<Option<RecordingSession>>>) {
                 mouse_y: last_mouse_pos.1,
             };
 
+            info!("{:?}", recording_event);
+
+            // let _ = tx.send(recording_event);
             let _ = tx.blocking_send(recording_event);
         }) {
             error!("Error in event listener: {:?}", error);
@@ -344,7 +360,7 @@ pub struct RecordingAnalysis {
 #[tauri::command]
 pub async fn start_recording(
     app_handle: AppHandle,
-    state: State<'_, Arc<RecorderState>>,
+    state: State<'_, RecorderState>,
 ) -> Result<(), String> {
     state
         .start_recording(app_handle)
@@ -355,7 +371,7 @@ pub async fn start_recording(
 #[tauri::command]
 pub async fn stop_recording(
     app_handle: AppHandle,
-    state: State<'_, Arc<RecorderState>>,
+    state: State<'_, RecorderState>,
 ) -> Result<(), String> {
     state
         .stop_recording(app_handle)
@@ -365,7 +381,7 @@ pub async fn stop_recording(
 
 #[tauri::command]
 pub async fn analyze_recording(
-    state: State<'_, Arc<RecorderState>>,
+    state: State<'_, RecorderState>,
 ) -> Result<RecordingAnalysis, String> {
     state.analyze_recording().await.map_err(|e| e.to_string())
 }

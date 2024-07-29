@@ -113,9 +113,10 @@ export default function MainScreen() {
           </CardHeader>
           <CardContent className="flex justify-center space-x-4">
             <Button
+              variant="outline"
               onClick={startRecording}
               disabled={isRecording}
-              className="bg-blue-500 hover:bg-blue-600 text-white"
+            // className="bg-blue-500 hover:bg-blue-600 text-white"
             >
               {isRecording ? (
                 <>

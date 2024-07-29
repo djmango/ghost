@@ -5,7 +5,6 @@ mod recording;
 
 use log::LevelFilter;
 use recording::recording::RecorderState;
-use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_log::{Target, TargetKind};
 
@@ -23,12 +22,9 @@ fn show_window(app: &AppHandle) {
 }
 
 fn main() {
-    let recorder_state = Arc::new(RecorderState::new());
-
     let mut ctx = tauri::generate_context!();
     tauri::Builder::default()
-        // .manage(Arc::new(Mutex::new(recording::Recorder::new())))
-        .manage(recorder_state)
+        .manage(RecorderState::new())
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
