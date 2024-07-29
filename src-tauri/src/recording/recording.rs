@@ -3,13 +3,15 @@ use chrono::Utc;
 use csv::Writer;
 use ffmpeg_sidecar::child::FfmpegChild;
 use ffmpeg_sidecar::command::FfmpegCommand;
+use image::{GenericImageView, Rgba};
+use imageproc::drawing::draw_filled_rect_mut;
+use imageproc::rect::Rect;
 use log::{debug, error, info, warn};
 use rdev::{listen, Event, EventType};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -60,6 +62,10 @@ impl RecordingSession {
         self.output_dir.join("events.csv")
     }
 
+    fn frames_dir(&self) -> PathBuf {
+        self.output_dir.join("frames")
+    }
+
     fn save_events_to_csv(&self) -> Result<()> {
         let mut writer = Writer::from_path(self.csv_path())?;
         writer.write_record(&["timestamp", "event_type", "details", "mouse_x", "mouse_y"])?;
@@ -86,6 +92,119 @@ impl RecordingSession {
         }
 
         writer.flush()?;
+        Ok(())
+    }
+
+    fn read_timestamps(&self) -> Vec<u64> {
+        let file = File::open(self.timestamp_path()).expect("Failed to open timestamp file");
+        let reader = BufReader::new(file);
+
+        reader
+            .lines()
+            .skip(1) // Skip the header line
+            .filter_map(|line| line.ok()?.parse::<u64>().ok())
+            .collect()
+    }
+
+    pub fn extract_frames_around_events(
+        &mut self,
+        frames_before: usize,
+        frames_after: usize,
+    ) -> Result<()> {
+        let frames_dir = self.frames_dir();
+        fs::create_dir_all(&frames_dir)?;
+        let video_path = self.video_path();
+
+        // Read timestamps from the file
+        let video_timestamps = self.read_timestamps();
+
+        for (event_index, event) in self.events.iter().enumerate() {
+            // Find the closest video timestamp to the event
+            let closest_timestamp_index = video_timestamps
+                .binary_search_by(|probe| probe.cmp(&event.timestamp))
+                .unwrap_or_else(|x| x);
+
+            let start_frame = closest_timestamp_index.saturating_sub(frames_before);
+            let end_frame =
+                (closest_timestamp_index + frames_after + 1).min(video_timestamps.len());
+
+            for frame_index in start_frame..end_frame {
+                let frame_timestamp = video_timestamps[frame_index];
+                let output_path = frames_dir.join(format!(
+                    "event_{:04}_frame_{:04}_{}.jpg",
+                    event_index,
+                    frame_index - start_frame,
+                    frame_timestamp
+                ));
+
+                // Extract frame
+                let status = FfmpegCommand::new()
+                    .args(&["-i", video_path.to_str().unwrap()])
+                    .args(&["-vf", &format!("select='eq(n,{})'", frame_index)])
+                    .args(&["-vframes", "1"])
+                    .args(&["-q:v", "3"])
+                    .args(&["-pix_fmt", "yuvj420p"])
+                    .output(output_path.to_str().unwrap())
+                    .spawn()?
+                    .wait()?;
+
+                if status.success() {
+                    info!(
+                        "Extracted frame for event {} at timestamp {}, file: {:?}",
+                        event_index, frame_timestamp, output_path
+                    );
+
+                    // Visualize cursor position on the frame
+                    self.visualize_cursor_on_frame(&output_path, event)?;
+                } else {
+                    error!(
+                        "Failed to extract frame at timestamp {} for event {}",
+                        frame_timestamp, event_index
+                    );
+                }
+            }
+        }
+
+        info!("Extracted frames around {} events", self.events.len());
+        Ok(())
+    }
+
+    fn visualize_cursor_on_frame(
+        &self,
+        frame_path: &PathBuf,
+        event: &RecordingEvent,
+    ) -> Result<()> {
+        let mut img = image::open(frame_path)?;
+        let (width, height) = img.dimensions();
+
+        // Ensure cursor coordinates are within image bounds
+        let x = event.mouse_x.clamp(0.0, width as f64 - 1.0) as i32;
+        let y = event.mouse_y.clamp(0.0, height as f64 - 1.0) as i32;
+
+        // Draw a red box around the cursor position
+        draw_filled_rect_mut(
+            &mut img,
+            Rect::at(x - 10, y - 10).of_size(20, 20),
+            Rgba([255, 0, 0, 128]), // Semi-transparent red
+        );
+
+        // Add text to describe the event
+        // let event_description = format!("{:?}", event.event.event_type);
+        // imageproc::drawing::draw_text_mut(
+        //     &mut img,
+        //     Rgba([255, 255, 255, 255]),
+        //     x + 15,
+        //     y + 15,
+        //     rusttype::Scale::uniform(20.0),
+        //     &rusttype::Font::try_from_bytes(include_bytes!("../assets/DejaVuSans.ttf")).unwrap(),
+        //     &event_description,
+        // );
+        info!(
+            "{:?} at x: {}, y: {} at timestamp {}",
+            event.event.event_type, x, y, event.timestamp
+        );
+
+        img.save(frame_path)?;
         Ok(())
     }
 }
@@ -229,41 +348,19 @@ impl RecorderState {
             return Err(anyhow!("No active recording session"));
         }
 
-        *session_guard = None;
-
         Ok(())
     }
-    fn analyze_recording(&self) -> Result<RecordingAnalysis> {
-        let session_guard = self.session.lock().unwrap();
-        let session = session_guard
-            .as_ref()
-            .ok_or_else(|| anyhow!("No recording session available"))?;
 
-        let total_duration = session.start_time.elapsed();
-
-        let mut event_counts = HashMap::new();
-        let mut total_mouse_distance = 0.0;
-        let mut last_mouse_pos = None;
-
-        for event in &session.events {
-            let event_type = format!("{:?}", event.event.event_type);
-            *event_counts.entry(event_type).or_insert(0) += 1;
-
-            // Calculate mouse movement
-            if let Some((prev_x, prev_y)) = last_mouse_pos {
-                let dx = event.mouse_x - prev_x;
-                let dy = event.mouse_y - prev_y;
-                total_mouse_distance += (dx as f64 * dx as f64 + dy as f64 * dy as f64).sqrt();
+    fn analyze_recording(&self) {
+        let mut session = self.session.lock().unwrap();
+        if let Some(session) = session.as_mut() {
+            match session.extract_frames_around_events(5, 5) {
+                Ok(_) => info!("Frame extraction and event visualization completed"),
+                Err(e) => error!("Error during frame extraction: {:?}", e),
             }
-            last_mouse_pos = Some((event.mouse_x, event.mouse_y));
+        } else {
+            error!("No active recording session");
         }
-
-        Ok(RecordingAnalysis {
-            total_duration: total_duration.as_secs(),
-            total_events: session.events.len(),
-            event_counts,
-            total_mouse_distance,
-        })
     }
 }
 
@@ -280,11 +377,15 @@ fn event_capture_task(
         let timestamp = Utc::now().timestamp_millis() as u64;
 
         // Update last known mouse position if this is a mouse move event
+        // NOTE: gotta grab scaling factor of monitor
         if let EventType::MouseMove { x, y } = event.event_type {
-            last_mouse_pos = (x, y);
+            last_mouse_pos = (x * 2 as f64, y * 2 as f64);
             // Do not record MouseMove events
             return;
         }
+
+        // NOTE: drag halts mousemove so we need to update last_mouse_pos here, not a nice way to
+        // do that with rdev so we can use window or something
 
         let recording_event = RecordingEvent {
             timestamp,
@@ -305,28 +406,13 @@ fn event_capture_task(
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-pub struct RecordingAnalysis {
-    total_duration: u64,
-    total_events: usize,
-    event_counts: HashMap<String, usize>,
-    total_mouse_distance: f64,
-}
-
 #[tauri::command]
 pub fn start_recording(app_handle: AppHandle, state: State<'_, RecorderState>) {
-    state.start_recording(app_handle);
+    _ = state.start_recording(app_handle);
 }
 
 #[tauri::command]
 pub fn stop_recording(app_handle: AppHandle, state: State<'_, RecorderState>) {
-    state.stop_recording(app_handle);
-}
-
-#[tauri::command]
-pub fn analyze_recording(state: State<'_, RecorderState>) -> Result<RecordingAnalysis, String> {
-    state.analyze_recording().map_err(|e| {
-        warn!("Failed to analyze recording: {:?}", e);
-        e.to_string()
-    })
+    _ = state.stop_recording(app_handle);
+    state.analyze_recording();
 }

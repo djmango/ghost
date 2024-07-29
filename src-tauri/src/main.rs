@@ -8,7 +8,7 @@ use recording::recording::RecorderState;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_log::{Target, TargetKind};
 
-use crate::recording::{analyze_recording, start_recording, stop_recording};
+use crate::recording::{start_recording, stop_recording};
 
 fn show_window(app: &AppHandle) {
     let windows = app.webview_windows();
@@ -42,11 +42,7 @@ fn main() {
                 ])
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![
-            start_recording,
-            stop_recording,
-            analyze_recording
-        ])
+        .invoke_handler(tauri::generate_handler![start_recording, stop_recording])
         .run(ctx)
         .expect("error while running tauri application");
 }
