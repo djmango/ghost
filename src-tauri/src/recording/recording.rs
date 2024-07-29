@@ -334,7 +334,7 @@ impl RecorderState {
             handle.join().unwrap();
         }
 
-        debug!("Stopping recording");
+        info!("Stopping recording");
 
         // Save events to CSV
         let mut session_guard = self.session.lock().unwrap();
