@@ -18,6 +18,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
+//use tauri::window::Window;
+use tauri::{Manager, WebviewWindow};
+use tauri::Runtime;
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RecordingEvent {
@@ -113,10 +117,13 @@ impl RecordingSession {
     ) -> Result<()> {
         let frames_dir = self.frames_dir();
         fs::create_dir_all(&frames_dir)?;
+        assert!(frames_dir.exists(), "Frames directory does not exist");
         let video_path = self.video_path();
 
         // Read timestamps from the file
         let video_timestamps = self.read_timestamps();
+
+        info!("{} calls to ffmpeg to extract", self.events.len());
 
         for (event_index, event) in self.events.iter().enumerate() {
             // Find the closest video timestamp to the event
@@ -137,14 +144,19 @@ impl RecordingSession {
                     frame_timestamp
                 ));
 
+                assert!(frame_timestamp.to_string().len() == 13, "frame_timestamp is not 13 digits long");
+                assert!(video_timestamps[0].to_string().len() == 13, "first video timestamp is not 13 digits long");
+                let relative_timestamp = frame_timestamp - video_timestamps[0];
+              
                 // Extract frame
                 let status = FfmpegCommand::new()
+                    .args(&["-accurate_seek"])
+                    .args(&["-ss", &format!("{}", relative_timestamp as f64 / 1000.0)])
                     .args(&["-i", video_path.to_str().unwrap()])
-                    .args(&["-vf", &format!("select='eq(n,{})'", frame_index)])
-                    .args(&["-vframes", "1"])
+                    .args(&["-frames:v", "1"])
                     .args(&["-q:v", "3"])
                     .args(&["-pix_fmt", "yuvj420p"])
-                    .output(output_path.to_str().unwrap())
+                    .output(output_path.to_str().unwrap_or("no_path"))
                     .spawn()?
                     .wait()?;
 
@@ -174,6 +186,10 @@ impl RecordingSession {
         frame_path: &PathBuf,
         event: &RecordingEvent,
     ) -> Result<()> {
+        // Assert that the frame_path exists
+        if !frame_path.exists() {
+            return Err(anyhow::anyhow!("Frame path does not exist: {:?}", frame_path));
+        }
         let mut img = image::open(frame_path)?;
         let (width, height) = img.dimensions();
 
@@ -203,7 +219,7 @@ impl RecordingSession {
             "{:?} at x: {}, y: {} at timestamp {}",
             event.event.event_type, x, y, event.timestamp
         );
-
+       
         img.save(frame_path)?;
         Ok(())
     }
@@ -308,8 +324,10 @@ impl RecorderState {
         // Start event capture in a separate thread
         let session = self.session.clone();
         let is_recording = self.is_recording.clone();
+        let main_window = app_handle.get_webview_window("main").expect("Failed to get main window");
         let event_handle = thread::spawn(move || {
-            let _ = event_capture_task(session, is_recording);
+
+            let _ = event_capture_task(session, is_recording, main_window);
         });
 
         *self.event_handle.lock().unwrap() = Some(event_handle);
@@ -320,7 +338,7 @@ impl RecorderState {
         Ok(())
     }
 
-    fn stop_recording(&self, app_handle: AppHandle) -> Result<()> {
+    async fn stop_recording(&self, app_handle: AppHandle) -> Result<()> {
         // Signal threads to stop
         self.is_recording.store(false, Ordering::SeqCst);
 
@@ -351,7 +369,7 @@ impl RecorderState {
         Ok(())
     }
 
-    fn analyze_recording(&self) {
+    async fn analyze_recording(&self) {
         let mut session = self.session.lock().unwrap();
         if let Some(session) = session.as_mut() {
             match session.extract_frames_around_events(5, 5) {
@@ -367,6 +385,7 @@ impl RecorderState {
 fn event_capture_task(
     session: Arc<Mutex<Option<RecordingSession>>>,
     is_recording: Arc<AtomicBool>,
+    main_window: WebviewWindow
 ) -> Result<()> {
     let mut last_mouse_pos = (0.0, 0.0);
     let _ = listen(move |event| {
@@ -375,11 +394,13 @@ fn event_capture_task(
         }
 
         let timestamp = Utc::now().timestamp_millis() as u64;
+        
+        // Get the scale factor
+        let scale_factor = main_window.scale_factor().unwrap_or(1.0);
 
         // Update last known mouse position if this is a mouse move event
-        // NOTE: gotta grab scaling factor of monitor
         if let EventType::MouseMove { x, y } = event.event_type {
-            last_mouse_pos = (x * 2 as f64, y * 2 as f64);
+            last_mouse_pos = (x * scale_factor, y * scale_factor);
             // Do not record MouseMove events
             return;
         }
@@ -412,7 +433,8 @@ pub fn start_recording(app_handle: AppHandle, state: State<'_, RecorderState>) {
 }
 
 #[tauri::command]
-pub fn stop_recording(app_handle: AppHandle, state: State<'_, RecorderState>) {
-    _ = state.stop_recording(app_handle);
-    state.analyze_recording();
+pub async fn stop_recording(app_handle: AppHandle<tauri::Wry>, state: State<'_, RecorderState>) -> Result<(), String> {
+    state.stop_recording(app_handle).await.map_err(|e| e.to_string())?;
+    state.analyze_recording().await;
+    Ok(())
 }
