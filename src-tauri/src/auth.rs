@@ -16,6 +16,7 @@ pub fn get_jwt_from_store(app: &AppHandle) -> Result<Option<String>, Box<dyn std
         Ok(jwt)
     }).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
 }
+
 pub fn parse_jwt_from_url(url: &str) -> Option<String> {
     if let Ok(parsed_url) = Url::parse(url) {
         if parsed_url.scheme() == "invisibility" && parsed_url.path() == "/auth_callback" {
