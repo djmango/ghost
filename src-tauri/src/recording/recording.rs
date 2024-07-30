@@ -123,6 +123,8 @@ impl RecordingSession {
         // Read timestamps from the file
         let video_timestamps = self.read_timestamps();
 
+        let mut visualization_handles = Vec::new();
+
         info!("{} calls to ffmpeg to extract", self.events.len());
 
         for (event_index, event) in self.events.iter().enumerate() {
@@ -133,7 +135,7 @@ impl RecordingSession {
 
             let start_frame = closest_timestamp_index.saturating_sub(frames_before);
             let end_frame =
-                (closest_timestamp_index + frames_after + 1).min(video_timestamps.len());
+                (closest_timestamp_index + frames_after).min(video_timestamps.len());
 
             for frame_index in start_frame..end_frame {
                 let frame_timestamp = video_timestamps[frame_index];
@@ -166,8 +168,15 @@ impl RecordingSession {
                         event_index, frame_timestamp, output_path
                     );
 
-                    // Visualize cursor position on the frame
-                    self.visualize_cursor_on_frame(&output_path, event)?;
+                    // Spawn a new thread for visualization
+                    let output_path = output_path.clone();
+                    let event = event.clone();
+                    let handle = thread::spawn(move || {
+                        if let Err(e) = visualize_cursor_on_frame(&output_path, &event) {
+                            error!("Failed to visualize cursor on frame: {:?}", e);
+                        }
+                    });
+                    visualization_handles.push(handle);
                 } else {
                     error!(
                         "Failed to extract frame at timestamp {} for event {}",
@@ -177,54 +186,59 @@ impl RecordingSession {
             }
         }
 
+        // Wait for all visualization threads to complete
+        for handle in visualization_handles {
+            handle.join().unwrap();
+        }
+
         info!("Extracted frames around {} events", self.events.len());
         Ok(())
     }
 
-    fn visualize_cursor_on_frame(
-        &self,
-        frame_path: &PathBuf,
-        event: &RecordingEvent,
-    ) -> Result<()> {
-        // Assert that the frame_path exists
-        if !frame_path.exists() {
-            return Err(anyhow::anyhow!("Frame path does not exist: {:?}", frame_path));
-        }
-        let mut img = image::open(frame_path)?;
-        let (width, height) = img.dimensions();
-
-        // Ensure cursor coordinates are within image bounds
-        let x = event.mouse_x.clamp(0.0, width as f64 - 1.0) as i32;
-        let y = event.mouse_y.clamp(0.0, height as f64 - 1.0) as i32;
-
-        // Draw a red box around the cursor position
-        draw_filled_rect_mut(
-            &mut img,
-            Rect::at(x - 10, y - 10).of_size(20, 20),
-            Rgba([255, 0, 0, 128]), // Semi-transparent red
-        );
-
-        // Add text to describe the event
-        // let event_description = format!("{:?}", event.event.event_type);
-        // imageproc::drawing::draw_text_mut(
-        //     &mut img,
-        //     Rgba([255, 255, 255, 255]),
-        //     x + 15,
-        //     y + 15,
-        //     rusttype::Scale::uniform(20.0),
-        //     &rusttype::Font::try_from_bytes(include_bytes!("../assets/DejaVuSans.ttf")).unwrap(),
-        //     &event_description,
-        // );
-        info!(
-            "{:?} at x: {}, y: {} at timestamp {}",
-            event.event.event_type, x, y, event.timestamp
-        );
-       
-        img.save(frame_path)?;
-        Ok(())
-    }
+   
 }
 
+fn visualize_cursor_on_frame(
+    frame_path: &PathBuf,
+    event: &RecordingEvent,
+) -> Result<()> {
+    // Assert that the frame_path exists
+    if !frame_path.exists() {
+        return Err(anyhow::anyhow!("Frame path does not exist: {:?}", frame_path));
+    }
+    let mut img = image::open(frame_path)?;
+    let (width, height) = img.dimensions();
+
+    // Ensure cursor coordinates are within image bounds
+    let x = event.mouse_x.clamp(0.0, width as f64 - 1.0) as i32;
+    let y = event.mouse_y.clamp(0.0, height as f64 - 1.0) as i32;
+
+    // Draw a red box around the cursor position
+    draw_filled_rect_mut(
+        &mut img,
+        Rect::at(x - 10, y - 10).of_size(20, 20),
+        Rgba([255, 0, 0, 128]), // Semi-transparent red
+    );
+
+    // Add text to describe the event
+    // let event_description = format!("{:?}", event.event.event_type);
+    // imageproc::drawing::draw_text_mut(
+    //     &mut img,
+    //     Rgba([255, 255, 255, 255]),
+    //     x + 15,
+    //     y + 15,
+    //     rusttype::Scale::uniform(20.0),
+    //     &rusttype::Font::try_from_bytes(include_bytes!("../assets/DejaVuSans.ttf")).unwrap(),
+    //     &event_description,
+    // );
+    info!(
+        "{:?} at x: {}, y: {} at timestamp {}",
+        event.event.event_type, x, y, event.timestamp
+    );
+    
+    img.save(frame_path)?;
+    Ok(())
+}
 pub struct RecorderState {
     session: Arc<Mutex<Option<RecordingSession>>>,
     ffmpeg_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
@@ -372,7 +386,7 @@ impl RecorderState {
     async fn analyze_recording(&self) {
         let mut session = self.session.lock().unwrap();
         if let Some(session) = session.as_mut() {
-            match session.extract_frames_around_events(5, 5) {
+            match session.extract_frames_around_events(0 ,1) {
                 Ok(_) => info!("Frame extraction and event visualization completed"),
                 Err(e) => error!("Error during frame extraction: {:?}", e),
             }
