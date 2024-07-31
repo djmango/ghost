@@ -21,6 +21,8 @@ use uuid::Uuid;
 //use tauri::window::Window;
 use tauri::{Manager, WebviewWindow};
 
+use crate::types::{KeyboardAction, KeyboardActionKey, MouseAction, ScrollAction};
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RecordingEvent {
@@ -28,6 +30,18 @@ struct RecordingEvent {
     event: Event,
     mouse_x: f64,
     mouse_y: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateDeventRequest {
+    pub session_id: Uuid,
+    pub recording_id: Uuid,
+    pub mouse_action: Option<MouseAction>,
+    pub keyboard_action: Option<KeyboardAction>,
+    pub scroll_action: Option<ScrollAction>,
+    pub mouse_x: i32,
+    pub mouse_y: i32,
+    pub event_timestamp_nanos: i64,
 }
 
 #[derive(Debug)]
@@ -406,7 +420,11 @@ fn event_capture_task(
             return;
         }
 
-        let timestamp = Utc::now().timestamp_millis() as u64;
+        // Get current time in nanoseconds
+        let timestamp = match Utc::now().timestamp_nanos_opt() {
+            Some(timestamp) => timestamp as u64,
+            None => return, // After the year 2262 this always be the case
+        };
         
         // Get the scale factor
         let scale_factor = main_window.scale_factor().unwrap_or(1.0);
@@ -428,11 +446,52 @@ fn event_capture_task(
             mouse_y: last_mouse_pos.1,
         };
 
-        info!("{:?}", recording_event);
+        // info!("{:?}", recording_event);
 
         let mut session_guard = session.lock().unwrap();
         if let Some(s) = session_guard.as_mut() {
             s.events.push(recording_event);
+
+            let mut create_devent_request = CreateDeventRequest {
+                session_id: s.id,
+                recording_id: Uuid::new_v4(),
+                mouse_action: None,
+                keyboard_action: None,
+                scroll_action: None,
+                mouse_x: last_mouse_pos.0 as i32,
+                mouse_y: last_mouse_pos.1 as i32,
+                event_timestamp_nanos: timestamp as i64,
+            };
+            
+            match event.event_type {
+                EventType::ButtonPress(btn) => {
+                    let mouse_action: MouseAction = btn.into();
+                    create_devent_request.mouse_action = Some(mouse_action);
+                },
+                EventType::KeyPress(key) => {
+                    let keyboard_action: KeyboardActionKey = key.into();
+                    create_devent_request.keyboard_action = Some(KeyboardAction {
+                        key: keyboard_action,
+                        duration: 100,
+                    });
+                },
+                EventType::Wheel { delta_x, delta_y } => {
+                    let scroll_action: ScrollAction = ScrollAction {
+                        x: delta_x as i32,
+                        y: delta_y as i32,
+                    };
+                    create_devent_request.scroll_action = Some(scroll_action);
+                },
+                _ => return,
+            };
+
+            let client = reqwest::blocking::Client::new();
+            let res = client.post("http://localhost:8000/devents/create")
+                .json(&create_devent_request)
+                .send();
+                // .await?;;
+
+            info!("Response: {:?}", res);
         }
     })
     .map_err(|e| anyhow!("Event capture failed: {:?}", e));
