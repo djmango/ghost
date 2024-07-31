@@ -45,7 +45,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            let _ = show_window(app);
+            show_window(app);
         }))
         .plugin(tauri_plugin_theme::init(ctx.config_mut()))
         .plugin(

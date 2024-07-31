@@ -6,7 +6,7 @@ use ffmpeg_sidecar::command::FfmpegCommand;
 use image::{GenericImageView, Rgba};
 use imageproc::drawing::draw_filled_rect_mut;
 use imageproc::rect::Rect;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use rdev::{listen, Event, EventType};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -20,7 +20,6 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 //use tauri::window::Window;
 use tauri::{Manager, WebviewWindow};
-use tauri::Runtime;
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,7 +71,7 @@ impl RecordingSession {
 
     fn save_events_to_csv(&self) -> Result<()> {
         let mut writer = Writer::from_path(self.csv_path())?;
-        writer.write_record(&["timestamp", "event_type", "details", "mouse_x", "mouse_y"])?;
+        writer.write_record(["timestamp", "event_type", "details", "mouse_x", "mouse_y"])?;
 
         for event in &self.events {
             let event_type = format!("{:?}", event.event.event_type);
@@ -86,7 +85,7 @@ impl RecordingSession {
                     format!("delta_x: {}, delta_y: {}", delta_x, delta_y)
                 }
             };
-            writer.write_record(&[
+            writer.write_record([
                 &event.timestamp.to_string(),
                 &event_type,
                 &details,
@@ -152,12 +151,12 @@ impl RecordingSession {
               
                 // Extract frame
                 let status = FfmpegCommand::new()
-                    .args(&["-accurate_seek"])
-                    .args(&["-ss", &format!("{}", relative_timestamp as f64 / 1000.0)])
-                    .args(&["-i", video_path.to_str().unwrap()])
-                    .args(&["-frames:v", "1"])
-                    .args(&["-q:v", "3"])
-                    .args(&["-pix_fmt", "yuvj420p"])
+                    .args(["-accurate_seek"])
+                    .args(["-ss", &format!("{}", relative_timestamp as f64 / 1000.0)])
+                    .args(["-i", video_path.to_str().unwrap()])
+                    .args(["-frames:v", "1"])
+                    .args(["-q:v", "3"])
+                    .args(["-pix_fmt", "yuvj420p"])
                     .output(output_path.to_str().unwrap_or("no_path"))
                     .spawn()?
                     .wait()?;
@@ -276,27 +275,27 @@ impl RecorderState {
         let ffmpeg_child = self.ffmpeg_child.clone();
         let ffmpeg_handle = thread::spawn(move || {
             let child = FfmpegCommand::new()
-                .args(&["-f", "avfoundation"])
-                .args(&["-capture_cursor", "1"])
-                .args(&["-capture_mouse_clicks", "1"])
-                .args(&["-framerate", "30"])
-                .args(&["-i", "1:none"])
-                .args(&["-vcodec", "libx264"])
-                .args(&["-preset", "ultrafast"])
-                .args(&["-crf", "23"])
-                .args(&[
+                .args(["-f", "avfoundation"])
+                .args(["-capture_cursor", "1"])
+                .args(["-capture_mouse_clicks", "1"])
+                .args(["-framerate", "30"])
+                .args(["-i", "1:none"])
+                .args(["-vcodec", "libx264"])
+                .args(["-preset", "ultrafast"])
+                .args(["-crf", "23"])
+                .args([
                     "-filter_complex",
                     "settb=1/1000,setpts='RTCTIME/1000',mpdecimate,split=2[out][ts]",
                 ])
-                .args(&["-map", "[out]"])
-                .args(&["-vcodec", "libx264"])
-                .args(&["-pix_fmt", "yuv420p"])
-                .args(&["-threads", "0"])
+                .args(["-map", "[out]"])
+                .args(["-vcodec", "libx264"])
+                .args(["-pix_fmt", "yuv420p"])
+                .args(["-threads", "0"])
                 .output(output_path.to_str().unwrap())
-                .args(&["-map", "[ts]"])
-                .args(&["-f", "mkvtimestamp_v2"])
+                .args(["-map", "[ts]"])
+                .args(["-f", "mkvtimestamp_v2"])
                 .output(timestamp_path.to_str().unwrap())
-                .args(&["-vsync", "0"])
+                .args(["-vsync", "0"])
                 .spawn()
                 .expect("Failed to start FFmpeg");
 
