@@ -15,8 +15,6 @@ anyhow = "1.0.86"
 chrono = "0.4.23"
 csv = "1.2.1"
 ffmpeg-sidecar = "1.1.0"
-image = "0.25.2"
-imageproc = "0.25.0"
 log = "0.4.22"
 rand = "0.8.5"
 # rdev = { version = "0.5.3", features = ["serde", "serialize"] }
