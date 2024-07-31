@@ -446,7 +446,7 @@ fn event_capture_task(
             mouse_y: last_mouse_pos.1,
         };
 
-        // info!("{:?}", recording_event);
+        info!("{:?}", recording_event);
 
         let mut session_guard = session.lock().unwrap();
         if let Some(s) = session_guard.as_mut() {
@@ -472,7 +472,7 @@ fn event_capture_task(
                     let keyboard_action: KeyboardActionKey = key.into();
                     create_devent_request.keyboard_action = Some(KeyboardAction {
                         key: keyboard_action,
-                        duration: 100,
+                        duration: 100, // TODO: make this dynamic by tracking keypress and keyrelease events
                     });
                 },
                 EventType::Wheel { delta_x, delta_y } => {
@@ -485,13 +485,18 @@ fn event_capture_task(
                 _ => return,
             };
 
+            // TODO: make this async
             let client = reqwest::blocking::Client::new();
             let res = client.post("http://localhost:8000/devents/create")
                 .json(&create_devent_request)
                 .send();
-                // .await?;;
+                // .await?;
+                
+            match res {
+                Ok(_) => info!("Event saved successfully"),
+                Err(e) => error!("Failed to send request: {:?}", e),
+            }
 
-            info!("Response: {:?}", res);
         }
     })
     .map_err(|e| anyhow!("Event capture failed: {:?}", e));
