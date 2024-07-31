@@ -29,8 +29,10 @@ fn main() {
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
-            app.listen("tauri://deep-link", move |event| {
+            app.listen("iinc-ghost", move |event| {
                 let payload = event.payload();
+                dbg!(payload);
+                println!("payload is: {}", payload);
                 if let Some(jwt) = parse_jwt_from_url(payload) {
                     match save_jwt_to_store(&app_handle, &jwt) {
                           Ok(_) => println!("success"),

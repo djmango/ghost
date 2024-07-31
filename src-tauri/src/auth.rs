@@ -19,6 +19,8 @@ pub fn get_jwt_from_store(app: &AppHandle) -> Result<Option<String>, Box<dyn std
 
 pub fn parse_jwt_from_url(url: &str) -> Option<String> {
     if let Ok(parsed_url) = Url::parse(url) {
+        println!("Got url:");
+        println!("{}",url);
         if parsed_url.scheme() == "invisibility" && parsed_url.path() == "/auth_callback" {
             return parsed_url.query_pairs()
                 .find(|(key, _)| key == "token")
