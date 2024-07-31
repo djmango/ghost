@@ -32,5 +32,4 @@ url = "2.5.2"
 uuid = { version = "1.10.0", features = ["serde", "v4"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri-plugin-single-instance = "2.0.0-beta"
 tauri-plugin-window-state = "2.0.0-beta"
