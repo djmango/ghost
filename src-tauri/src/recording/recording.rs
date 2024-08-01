@@ -117,14 +117,14 @@ impl RecordingSession {
 
 fn get_ffmpeg_command(output_path: &str, timestamp_path: &str) -> FfmpegCommand {
     let mut cmd = FfmpegCommand::new();
-
+   
     // OS-specific input configuration
     #[cfg(target_os = "macos")]
     {
         cmd.args(["-f", "avfoundation"])
             .args(["-capture_cursor", "1"])
             .args(["-capture_mouse_clicks", "1"])
-            .args(["-i", "1:none"]);
+            .args(["-i", "2"]); // TODO device idx for Capture Screen changes.
     }
 
     #[cfg(target_os = "windows")]
@@ -138,7 +138,8 @@ fn get_ffmpeg_command(output_path: &str, timestamp_path: &str) -> FfmpegCommand 
     }
 
     // Common configuration for all platforms
-    cmd.args(["-framerate", "30"])
+    cmd
+        .args(["-framerate", "30"])
         .args(["-vcodec", "libx264"])
         .args(["-preset", "ultrafast"])
         .args(["-crf", "23"])
@@ -250,10 +251,12 @@ impl RecorderState {
             .expect("Failed to get main window");
         let runtime = self.runtime.clone();
         let runtime_clone = runtime.clone();
+
         let event_handle = thread::spawn(move || {
             event_capture_task(session, is_recording, main_window, runtime)
                 .expect("Failed to start event capture");
         });
+
         thread::spawn(move || {
             monitor_segments(
                 video_dir_path_clone,
@@ -383,7 +386,7 @@ fn event_capture_task(
             runtime.spawn(async move {
                 let client = reqwest::Client::new();
                 let res = client
-                    .post("http://localhost:8000/devents/create")
+                    .post("https://echo.i.inc/devents/create")
                     .json(&create_devent_request)
                     .send()
                     .await;
@@ -410,6 +413,11 @@ fn monitor_segments(
 
     loop {
         thread::sleep(Duration::from_secs(1));
+           // Check if the file exists
+        if !segment_csv_path.exists() {
+            continue;
+        }
+
         let file = File::open(&segment_csv_path).unwrap();
         let mut reader = BufReader::new(file);
         reader.seek(SeekFrom::Start(last_position)).unwrap();
@@ -433,7 +441,7 @@ fn monitor_segments(
 
                         runtime.spawn(async move {
                             let res = client
-                                .post("http://localhost:8000/recordings/fetch_save_url")
+                                .post("https://echo.i.inc/recordings/fetch_save_url")
                                 .json(&SaveRecordingRequest {
                                     recording_id: Uuid::new_v4(),
                                     session_id,
