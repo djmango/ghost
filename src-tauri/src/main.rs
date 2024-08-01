@@ -1,6 +1,8 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+
+mod types;
 mod auth;
 mod recording;
 
@@ -56,8 +58,8 @@ fn main() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
-        // .plugin(tauri_plugin_window_state::Builder::default().build())
-        // .plugin(tauri_plugin_theme::init(ctx.config_mut()))
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_theme::init(ctx.config_mut()))
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(LevelFilter::Debug)
