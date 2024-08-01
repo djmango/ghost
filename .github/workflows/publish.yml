@@ -22,8 +22,8 @@ jobs:
           #   args: ""
           - platform: "windows-latest"
             args: ""
-          # - platform: "windows-latest"
-          #   args: "--target aarch64-pc-windows-msvc"
+          - platform: "windows-latest"
+            args: "--target aarch64-pc-windows-msvc"
           # arm windows
           # aarch64-pc-windows-msvc
           # 32-bit windows
@@ -47,7 +47,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           # Those targets are only used on macos runners so it's in an `if` to slightly speed up windows and linux builds.
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          # targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.platform == 'windows-latest' && 'aarch64-pc-windows-msvc,x86_64-pc-windows-msvc' || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
