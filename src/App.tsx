@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, React } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { trace, info, error, attachConsole } from '@tauri-apps/plugin-log';
@@ -22,6 +22,7 @@ interface RecordingAnalysis {
 }
 
 export default function MainScreen() {
+  const [email, setEmail] = useState<string>('');
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [alert, setAlert] = useState<Alert | null>(null);
   const [analysis, setAnalysis] = useState<RecordingAnalysis | null>(null);
@@ -93,6 +94,17 @@ export default function MainScreen() {
     }
   };
 
+  const handleEmailSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await invoke('set_email', { email });
+      setAlert({ type: 'success', message: 'Email set successfully' });
+    } catch (error: any) {
+      error(`Failed to set email: ${error}`);
+      setAlert({ type: 'error', message: 'Failed to set email' });
+    }
+  };
+
   return (
     <div className="min-h-screen bg-white dark:bg-gray-900 text-black dark:text-white p-8 flex flex-col items-center justify-start">
       <div className="max-w-4xl w-full flex flex-col items-center text-center">
@@ -106,6 +118,24 @@ export default function MainScreen() {
             <AlertDescription>{alert.message}</AlertDescription>
           </Alert>
         )}
+
+        <Card className="w-full mb-8 bg-white dark:bg-gray-800">
+          <CardHeader>
+            <CardTitle>Set Email</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleEmailSubmit} className="space-y-4">
+              <input
+                type="text"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="Enter your email"
+                className="w-full p-2 border rounded"
+              />
+              <Button type="submit">Set Email</Button>
+            </form>
+          </CardContent>
+        </Card>
 
         <Card className="w-full mb-8 bg-white dark:bg-gray-800">
           <CardHeader>
