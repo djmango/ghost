@@ -1,27 +1,17 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod recording;
+
 mod types;
 mod auth;
+mod recording;
 
+use crate::auth::{parse_jwt_from_url, save_jwt_to_store};
+use crate::recording::{start_recording, stop_recording};
 use log::LevelFilter;
 use recording::recording::RecorderState;
-use tauri::{AppHandle, Manager};
-use tauri_plugin_log::{Target, TargetKind};
 use tauri::Listener;
-use crate::recording::{start_recording, stop_recording};
-use crate::auth::{parse_jwt_from_url, save_jwt_to_store};
-
-fn show_window(app: &AppHandle) {
-    let windows = app.webview_windows();
-    windows
-        .values()
-        .next()
-        .expect("Sorry, no window found")
-        .set_focus()
-        .expect("Can't Bring Window to Focus");
-}
+use tauri_plugin_log::{Target, TargetKind};
 
 fn main() {
     let mut ctx = tauri::generate_context!();
@@ -34,8 +24,8 @@ fn main() {
                 let payload = event.payload();
                 if let Some(jwt) = parse_jwt_from_url(payload) {
                     match save_jwt_to_store(&app_handle, &jwt) {
-                          Ok(_) => println!("success"),
-                        Err(_) => println!("Fail")
+                        Ok(_) => println!("success"),
+                        Err(_) => println!("Fail"),
                     }
                 }
             });
@@ -44,11 +34,8 @@ fn main() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            show_window(app);
-        }))
-        .plugin(tauri_plugin_theme::init(ctx.config_mut()))
+        // .plugin(tauri_plugin_window_state::Builder::default().build())
+        // .plugin(tauri_plugin_theme::init(ctx.config_mut()))
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(LevelFilter::Debug)
@@ -63,3 +50,4 @@ fn main() {
         .run(ctx)
         .expect("error while running tauri application");
 }
+
