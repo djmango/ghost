@@ -1,16 +1,16 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-
-mod types;
 mod auth;
 mod recording;
+mod types;
 
 use crate::auth::{parse_jwt_from_url, save_jwt_to_store};
 use crate::recording::{start_recording, stop_recording};
 use log::LevelFilter;
 use recording::recording::RecorderState;
 use tauri::Listener;
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_log::{Target, TargetKind};
 
 fn main() {
@@ -20,7 +20,7 @@ fn main() {
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
-            app.listen("tauri://deep-link", move |event| {
+            app.listen("iinc-ghost://auth_callback", move |event| {
                 let payload = event.payload();
                 if let Some(jwt) = parse_jwt_from_url(payload) {
                     match save_jwt_to_store(&app_handle, &jwt) {
@@ -50,4 +50,3 @@ fn main() {
         .run(ctx)
         .expect("error while running tauri application");
 }
-

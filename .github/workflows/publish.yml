@@ -22,12 +22,12 @@ jobs:
           #   args: ""
           - platform: "windows-latest"
             args: ""
-          - platform: "windows-latest"
-            args: "--target aarch64-pc-windows-msvc"
-            # arm windows
-            # aarch64-pc-windows-msvc
-            # 32-bit windows
-            # i686-pc-windows-msvc
+          # - platform: "windows-latest"
+          #   args: "--target aarch64-pc-windows-msvc"
+          # arm windows
+          # aarch64-pc-windows-msvc
+          # 32-bit windows
+          # i686-pc-windows-msvc
 
     runs-on: ${{ matrix.platform }}
     steps:

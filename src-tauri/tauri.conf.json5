@@ -35,5 +35,13 @@
         "type": "downloadBootstrapper" 
       }
     }
+  },
+  "plugins": {
+    "deep-link": {
+      "mobile": [ { "host": "i.inc" } ],
+      "desktop": {
+        "schemes": ["iinc-ghost"]
+      }
+    }
   }
 }
