@@ -9,8 +9,9 @@ use imageproc::rect::Rect;
 use log::{error, info, warn};
 use rdev::{listen, Event, EventType};
 use serde::{Deserialize, Serialize};
+use tauri::async_runtime::TokioRuntime;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{Read, BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,7 +36,6 @@ struct RecordingEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateDeventRequest {
     pub session_id: Uuid,
-    pub recording_id: Uuid,
     pub mouse_action: Option<MouseAction>,
     pub keyboard_action: Option<KeyboardAction>,
     pub scroll_action: Option<ScrollAction>,
@@ -44,9 +44,18 @@ pub struct CreateDeventRequest {
     pub event_timestamp_nanos: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveRecordingRequest {
+    pub recording_id: Uuid,
+    pub session_id: Uuid,
+    pub start_timestamp_nanos: i64,
+    pub duration_ms: u64,
+}
+
 #[derive(Debug)]
 struct RecordingSession {
     id: Uuid,
+    curr_recording_id: Option<Uuid>,
     start_time: Instant,
     events: Vec<RecordingEvent>,
     output_dir: PathBuf,
@@ -59,8 +68,12 @@ impl RecordingSession {
         let output_dir = PathBuf::from(format!("output/{}", timestamp));
         fs::create_dir_all(&output_dir).context("Failed to create output directory")?;
 
+        let recordings_dir = output_dir.join("recordings");
+        fs::create_dir_all(&recordings_dir).context("Failed to create recordings directory")?;
+
         Ok(RecordingSession {
             id,
+            curr_recording_id: None,
             start_time: Instant::now(),
             events: Vec::new(),
             output_dir,
@@ -68,7 +81,11 @@ impl RecordingSession {
     }
 
     fn video_path(&self) -> PathBuf {
-        self.output_dir.join("recording.mkv")
+        self.output_dir.join("recordings")
+    }
+
+    fn segment_csv_path(&self) -> PathBuf {
+        self.output_dir.join("segments.csv")
     }
 
     fn timestamp_path(&self) -> PathBuf {
@@ -258,6 +275,7 @@ pub struct RecorderState {
     ffmpeg_child: Arc<Mutex<Option<FfmpegChild>>>,
     event_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     is_recording: Arc<AtomicBool>,
+    runtime: Arc<TokioRuntime>,
 }
 
 impl RecorderState {
@@ -268,6 +286,7 @@ impl RecorderState {
             ffmpeg_child: Arc::new(Mutex::new(None)),
             event_handle: Arc::new(Mutex::new(None)),
             is_recording: Arc::new(AtomicBool::new(false)),
+            runtime: Arc::new(TokioRuntime::new().expect("Failed to create Tokio runtime")),
         }
     }
 
@@ -277,8 +296,12 @@ impl RecorderState {
             return Err(anyhow!("Recording is already in progress"));
         }
         let new_session = RecordingSession::new()?;
-        let output_path = new_session.video_path();
+        let session_id = new_session.id;
+        let video_dir_path = new_session.video_path();
+        let video_dir_path_clone = new_session.video_path();
         let timestamp_path = new_session.timestamp_path();
+        let segment_csv_path = new_session.segment_csv_path();
+        let segment_csv_path_clone = new_session.segment_csv_path();
         *session_guard = Some(new_session);
         drop(session_guard);
 
@@ -305,7 +328,15 @@ impl RecorderState {
                 .args(["-vcodec", "libx264"])
                 .args(["-pix_fmt", "yuv420p"])
                 .args(["-threads", "0"])
-                .output(output_path.to_str().unwrap())
+                .args(["-force_key_frames", "expr:gte(t,n_forced*60)"])
+                .args(["-f", "segment"])
+                .args(["-segment_time", "60"])  // 60 seconds per chunk
+                .args(["-reset_timestamps", "1"])
+                .args(["-segment_format", "mkv"])
+                .args(["-strftime", "1"])  // Enable strftime formatting
+                .args(["-segment_list_type", "csv"])
+                .args(["-segment_list", segment_csv_path.to_str().unwrap()])
+                .output(video_dir_path.join("chunk_%s.mkv").to_str().unwrap())
                 .args(["-map", "[ts]"])
                 .args(["-f", "mkvtimestamp_v2"])
                 .output(timestamp_path.to_str().unwrap())
@@ -352,9 +383,13 @@ impl RecorderState {
         let session = self.session.clone();
         let is_recording = self.is_recording.clone();
         let main_window = app_handle.get_webview_window("main").expect("Failed to get main window");
+        let runtime = self.runtime.clone();
+        let runtime_clone = runtime.clone();
         let event_handle = thread::spawn(move || {
-
-            let _ = event_capture_task(session, is_recording, main_window);
+            let _ = event_capture_task(session, is_recording, main_window, runtime);
+        });
+        thread::spawn(move || {
+            monitor_segments(video_dir_path_clone, segment_csv_path_clone, session_id, runtime_clone);
         });
 
         *self.event_handle.lock().unwrap() = Some(event_handle);
@@ -412,7 +447,8 @@ impl RecorderState {
 fn event_capture_task(
     session: Arc<Mutex<Option<RecordingSession>>>,
     is_recording: Arc<AtomicBool>,
-    main_window: WebviewWindow
+    main_window: WebviewWindow,
+    runtime: Arc<TokioRuntime>,
 ) -> Result<()> {
     let mut last_mouse_pos = (0.0, 0.0);
     let _ = listen(move |event| {
@@ -446,7 +482,7 @@ fn event_capture_task(
             mouse_y: last_mouse_pos.1,
         };
 
-        info!("{:?}", recording_event);
+        // info!("{:?}", recording_event);
 
         let mut session_guard = session.lock().unwrap();
         if let Some(s) = session_guard.as_mut() {
@@ -454,7 +490,6 @@ fn event_capture_task(
 
             let mut create_devent_request = CreateDeventRequest {
                 session_id: s.id,
-                recording_id: Uuid::new_v4(),
                 mouse_action: None,
                 keyboard_action: None,
                 scroll_action: None,
@@ -485,23 +520,109 @@ fn event_capture_task(
                 _ => return,
             };
 
-            // TODO: make this async
-            let client = reqwest::blocking::Client::new();
-            let res = client.post("http://localhost:8000/devents/create")
-                .json(&create_devent_request)
-                .send();
-                // .await?;
-                
-            match res {
-                Ok(_) => info!("Event saved successfully"),
-                Err(e) => error!("Failed to send request: {:?}", e),
-            }
-
+            let runtime = runtime.clone();
+            runtime.spawn(async move {
+                let client = reqwest::Client::new();
+                let res = client.post("http://localhost:8000/devents/create")
+                    .json(&create_devent_request)
+                    .send()
+                    .await;
+                    
+                match res {
+                    Ok(_) => info!("Event saved successfully"),
+                    Err(e) => error!("Failed to send request: {:?}", e),
+                }
+            });
         }
     })
     .map_err(|e| anyhow!("Event capture failed: {:?}", e));
 
     Ok(())
+}
+
+fn monitor_segments(
+    recording_dir_path: PathBuf, 
+    segment_csv_path: PathBuf, 
+    session_id: Uuid,
+    runtime: Arc<TokioRuntime>,
+) {
+    let mut last_position = 0;
+
+    loop {
+        thread::sleep(Duration::from_secs(1));
+        let file = File::open(&segment_csv_path).unwrap();
+        let mut reader = BufReader::new(file);
+        reader.seek(SeekFrom::Start(last_position)).unwrap();
+
+        let mut buffer = String::new();
+        loop {
+            buffer.clear();
+            match reader.read_line(&mut buffer) {
+                Ok(0) => break, // End of file
+                Ok(_) => {
+                    // Process the new segment
+                    let parts: Vec<&str> = buffer.trim().split(',').collect();
+                    if parts.len() == 3 {
+                        let filename = parts[0].to_string();
+                        let start_time: f64 = parts[1].parse().unwrap_or_default();
+                        let end_time: f64 = parts[2].parse().unwrap_or_default();
+                        info!("New segment: {}, {} to {}", filename, start_time, end_time);
+
+                        let client = reqwest::Client::new();
+                        let recording_dir_path_clone = recording_dir_path.clone();
+
+                        runtime.spawn(async move {
+                            let res = client.post("http://localhost:8000/recordings/fetch_save_url")
+                                .json(&SaveRecordingRequest {
+                                    recording_id: Uuid::new_v4(),
+                                    session_id,
+                                    start_timestamp_nanos: start_time as i64,
+                                    duration_ms: (end_time - start_time) as u64,
+                                })
+                                .send()
+                                .await;
+                                
+                            match res {
+                                Ok(res) => {
+                                    let url = res.text().await.unwrap();
+
+                                    let video_file_path = recording_dir_path_clone.join(filename);
+                                    let mut video_file = File::open(&video_file_path).unwrap();
+                                    let mut video_content = Vec::new();
+                                    video_file.read_to_end(&mut video_content).unwrap();
+
+                                    let upload_res = client.put(url)
+                                        .header("Content-Type", "video/x-matroska")
+                                        .body(video_content)
+                                        .send()
+                                        .await;    
+
+                                    match upload_res {
+                                        Ok(_) => info!("Uploaded recording successfully"),
+                                        Err(e) => error!("Failed to upload recording: {:?}", e),
+                                    }
+                                },
+                                Err(e) => error!("Failed to send request: {:?}", e),
+                            }
+                        });
+                    }
+                    
+                    // Update last_position after processing each line
+                    match reader.stream_position() {
+                        Ok(pos) => last_position = pos,
+                        Err(e) => {
+                            error!("Failed to get stream position: {:?}", e);
+                            break;
+                        }
+                    };
+                }
+                Err(e) => {
+                    error!("Error reading line: {:?}", e);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 #[tauri::command]
