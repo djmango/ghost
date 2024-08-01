@@ -17,6 +17,34 @@ use uuid::Uuid;
 //use tauri::window::Window;
 use tauri::{Manager, WebviewWindow};
 
+use tauri_plugin_store::StoreCollection;
+use serde_json::Value;
+
+struct AppState {
+    username: Mutex<String>,
+}
+
+impl AppState {
+    fn new() -> Self {
+        AppState {
+            username: Mutex::new(String::new()),
+        }
+    }
+}
+
+#[tauri::command]
+fn get_email(app_handle: tauri::AppHandle) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let stores = app_handle.state::<StoreCollection<tauri::Wry>>();
+    let path: PathBuf = PathBuf::from("store.bin");
+
+    tauri_plugin_store::with_store(app_handle.clone(), stores, path, |store| {
+        let email = store.get("email")
+            .and_then(|v| v.as_str().map(String::from));
+        
+        Ok(email)
+    }).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RecordingEvent {
     timestamp: u64,
@@ -122,9 +150,10 @@ fn get_ffmpeg_command(output_path: &str, timestamp_path: &str) -> FfmpegCommand 
             "settb=1/1000,setpts='RTCTIME/1000',mpdecimate,split=2[out][ts]",
         ])
         .args(["-map", "[out]"])
-        .args(["-vcodec", "libx264"])
         .args(["-pix_fmt", "yuv420p"])
         .args(["-threads", "0"])
+        .args(["-y"])  // Overwrite output file if it exists
+        .arg("-o")  // Explicitly specify output file
         .arg(output_path)
         .args(["-map", "[ts]"])
         .args(["-f", "mkvtimestamp_v2"])
@@ -154,6 +183,14 @@ impl RecorderState {
     }
 
     fn start_recording(&self, app_handle: AppHandle) -> Result<()> {
+        // Get the username
+        let username = get_email(app_handle.clone())
+            .unwrap_or(None)
+            .unwrap_or_else(|| "Unknown User".to_string());
+    
+        // Log the username
+        info!("Starting recording for user: {}", username);
+    
         let mut session_guard = self.session.lock().unwrap();
         if session_guard.is_some() {
             return Err(anyhow!("Recording is already in progress"));

@@ -18,7 +18,6 @@
     "log:default",
     "log:default",
     "event:default",
-    "deep-link:default",
     "store:allow-get",
     "store:allow-set",
     "store:allow-save",
