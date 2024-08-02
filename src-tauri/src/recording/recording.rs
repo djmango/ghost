@@ -56,16 +56,23 @@ struct RecordingSession {
 }
 
 impl RecordingSession {
-    fn new() -> Result<Self> {
+    fn new(app_handle: Arc<AppHandle>) -> Result<Self> {
+        // Store the recording session in a unique directory under app data (different but
+        // predictable per OS, we should always have read/write access)
         let id = Uuid::new_v4();
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let output_dir = PathBuf::from(format!("output/{}", timestamp));
+        let output_dir = app_handle
+            .path()
+            .app_data_dir()
+            .unwrap()
+            .join(format!("output/{}", timestamp));
         fs::create_dir_all(&output_dir).context("Failed to create output directory")?;
 
         let recordings_dir = output_dir.join("recordings");
         fs::create_dir_all(&recordings_dir).context("Failed to create recordings directory")?;
 
         Ok(RecordingSession {
+            // app_handle,
             id,
             events: Vec::new(),
             output_dir,
@@ -118,7 +125,11 @@ impl RecordingSession {
     }
 }
 
-fn get_ffmpeg_command(video_output_path: &str, segment_csv_path: &str, timestamp_path: &str) -> FfmpegCommand {
+fn get_ffmpeg_command(
+    video_output_path: &str,
+    segment_csv_path: &str,
+    timestamp_path: &str,
+) -> FfmpegCommand {
     let mut cmd = FfmpegCommand::new();
 
     // OS-specific input configuration
@@ -155,7 +166,7 @@ fn get_ffmpeg_command(video_output_path: &str, segment_csv_path: &str, timestamp
         .args(["-threads", "0"])
         .args(["-force_key_frames", "expr:gte(t,n_forced*60)"])
         .args(["-f", "segment"])
-        .args(["-segment_time", "60"])  // 60 seconds per chunk
+        .args(["-segment_time", "60"]) // 60 seconds per chunk
         .args(["-reset_timestamps", "1"])
         .args(["-segment_format", "mkv"])
         .args(["-segment_list_type", "csv"])
@@ -170,32 +181,34 @@ fn get_ffmpeg_command(video_output_path: &str, segment_csv_path: &str, timestamp
 }
 
 pub struct RecorderState {
-    session: Arc<Mutex<Option<RecordingSession>>>,
-    ffmpeg_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
-    ffmpeg_child: Arc<Mutex<Option<FfmpegChild>>>,
+    app_handle: Arc<AppHandle>,
     event_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    ffmpeg_child: Arc<Mutex<Option<FfmpegChild>>>,
+    ffmpeg_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     is_recording: Arc<AtomicBool>,
     runtime: Arc<TokioRuntime>,
+    session: Arc<Mutex<Option<RecordingSession>>>,
 }
 
 impl RecorderState {
-    pub fn new() -> Self {
+    pub fn new(app_handle: &AppHandle) -> Self {
         RecorderState {
-            session: Arc::new(Mutex::new(None)),
-            ffmpeg_handle: Arc::new(Mutex::new(None)),
-            ffmpeg_child: Arc::new(Mutex::new(None)),
+            app_handle: Arc::new(app_handle.clone()),
             event_handle: Arc::new(Mutex::new(None)),
+            ffmpeg_child: Arc::new(Mutex::new(None)),
+            ffmpeg_handle: Arc::new(Mutex::new(None)),
             is_recording: Arc::new(AtomicBool::new(false)),
             runtime: Arc::new(TokioRuntime::new().expect("Failed to create Tokio runtime")),
+            session: Arc::new(Mutex::new(None)),
         }
     }
 
-    fn start_recording(&self, app_handle: AppHandle) -> Result<()> {
+    fn start_recording(&self) -> Result<()> {
         let mut session_guard = self.session.lock().unwrap();
         if session_guard.is_some() {
             return Err(anyhow!("Recording is already in progress"));
         }
-        let new_session = RecordingSession::new()?;
+        let new_session = RecordingSession::new(self.app_handle.clone())?;
         let session_id = new_session.id;
         let video_dir_path = new_session.video_path();
         let video_dir_path_clone = video_dir_path.clone();
@@ -257,7 +270,8 @@ impl RecorderState {
         // Start event capture in a separate thread
         let session = self.session.clone();
         let is_recording = self.is_recording.clone();
-        let main_window = app_handle
+        let main_window = self
+            .app_handle
             .get_webview_window("main")
             .expect("Failed to get main window");
         let runtime = self.runtime.clone();
@@ -278,12 +292,12 @@ impl RecorderState {
         *self.event_handle.lock().unwrap() = Some(event_handle);
 
         info!("Recording started successfully");
-        app_handle.emit("recording_started", ()).unwrap();
+        self.app_handle.emit("recording_started", ()).unwrap();
 
         Ok(())
     }
 
-    async fn stop_recording(&self, app_handle: AppHandle) -> Result<()> {
+    async fn stop_recording(&self) -> Result<()> {
         // Signal threads to stop
         self.is_recording.store(false, Ordering::SeqCst);
 
@@ -303,8 +317,8 @@ impl RecorderState {
         let mut session_guard = self.session.lock().unwrap();
         if let Some(s) = session_guard.as_mut() {
             s.save_events_to_csv()?;
-            info!("Recording saved to {:?}", s.output_dir);
-            app_handle
+            info!("Recording saved to {:?}", s.output_dir.canonicalize()?);
+            self.app_handle
                 .emit("recording_complete", s.output_dir.to_str())
                 .unwrap();
         } else {
@@ -500,18 +514,12 @@ fn monitor_segments(
 }
 
 #[tauri::command]
-pub fn start_recording(app_handle: AppHandle, state: State<'_, RecorderState>) {
-    _ = state.start_recording(app_handle);
+pub fn start_recording(state: State<'_, RecorderState>) {
+    _ = state.start_recording();
 }
 
 #[tauri::command]
-pub async fn stop_recording(
-    app_handle: AppHandle<tauri::Wry>,
-    state: State<'_, RecorderState>,
-) -> Result<(), String> {
-    state
-        .stop_recording(app_handle)
-        .await
-        .map_err(|e| e.to_string())?;
+pub async fn stop_recording(state: State<'_, RecorderState>) -> Result<(), String> {
+    state.stop_recording().await.map_err(|e| e.to_string())?;
     Ok(())
 }

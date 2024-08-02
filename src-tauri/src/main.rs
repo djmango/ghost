@@ -5,48 +5,33 @@ mod auth;
 mod recording;
 mod types;
 
-use crate::auth::{parse_jwt_from_url, save_jwt_to_store};
-use crate::recording::{start_recording, stop_recording};
-use log::LevelFilter;
+use log::{debug, LevelFilter};
 use recording::recording::RecorderState;
-use tauri::Listener;
-use tauri_plugin_fs::FsExt;
-// use tauri_plugin_deep_link::DeepLinkExt;
-use tauri::path::BaseDirectory;
+use std::{fs, sync::Arc};
+use tauri::Manager;
 use tauri_plugin_log::{Target, TargetKind};
 
+use crate::recording::{start_recording, stop_recording};
+
 fn main() {
-    let mut ctx = tauri::generate_context!();
     tauri::Builder::default()
-        .manage(RecorderState::new())
-        .plugin(tauri_plugin_fs::init())
+        // .manage(RecorderState::new())
         .setup(|app| {
-            // allowed the given directory
-            // let scope = app.fs_scope();
-            // scope.allow_directory("/path/to/directory", false);
-            // dbg!(scope.allowed());
-            // Ensure the base directory is created
-            BaseDirectory.Ok(())
+            app.manage(RecorderState::new(app.handle()));
+
+            fs::create_dir_all(app.path().app_data_dir().unwrap()).unwrap();
+
+            let base_dir = app.path().app_data_dir().unwrap();
+
+            debug!("Custom directory: {:?}", base_dir);
+
+            Ok(())
         })
-        // .plugin(tauri_plugin_deep_link::init())
-        // .setup(|app| {
-        //     let app_handle = app.handle().clone();
-        //     app.listen("iinc-ghost://auth_callback", move |event| {
-        //         let payload = event.payload();
-        //         if let Some(jwt) = parse_jwt_from_url(payload) {
-        //             match save_jwt_to_store(&app_handle, &jwt) {
-        //                 Ok(_) => println!("success"),
-        //                 Err(_) => println!("Fail"),
-        //             }
-        //         }
-        //     });
-        //     Ok(())
-        // })
+        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
-        // .plugin(tauri_plugin_window_state::Builder::default().build())
-        // .plugin(tauri_plugin_theme::init(ctx.config_mut()))
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(LevelFilter::Debug)
@@ -58,6 +43,6 @@ fn main() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![start_recording, stop_recording])
-        .run(ctx)
+        .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
