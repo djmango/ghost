@@ -4,7 +4,8 @@ use csv::Writer;
 use ffmpeg_sidecar::child::FfmpegChild;
 use ffmpeg_sidecar::command::{ffmpeg_is_installed, FfmpegCommand};
 use ffmpeg_sidecar::download::auto_download;
-use log::{error, info, warn};
+use ffmpeg_sidecar::event::FfmpegEvent;
+use log::{debug, error, info, warn};
 use rdev::{listen, Event, EventType};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -136,23 +137,28 @@ fn get_ffmpeg_command(
     // OS-specific input configuration
     #[cfg(target_os = "macos")]
     {
-        cmd.args(["-f", "avfoundation"]).args(["-i", "1:none"]);
+        cmd.args(["-f", "avfoundation"])
+            .args(["-capture_cursor", "1"])
+            // .args(["-capture_mouse_clicks", "1"])
+            .args(["-i", "2:none"]);
     }
 
     #[cfg(target_os = "windows")]
     {
-        cmd.args(["-f", "gdigrab"]).args(["-i", "desktop"]);
+        cmd.args(["-f", "gdigrab"])
+            .args(["-capture_cursor", "1"])
+            .args(["-i", "desktop"]);
     }
 
     #[cfg(target_os = "linux")]
     {
-        cmd.args(["-f", "x11grab"]).args(["-i", ":0.0"]);
+        cmd.args(["-f", "x11grab"])
+            .args(["-capture_cursor", "1"])
+            .args(["-i", ":0.0"]);
     }
 
     // Common configuration for all platforms
-    cmd.args(["-capture_cursor", "1"])
-        // .args(["-capture_mouse_clicks", "1"])
-        .args(["-framerate", "30"])
+    cmd.args(["-framerate", "30"])
         .args(["-vcodec", "libx264"])
         .args(["-preset", "ultrafast"])
         .args(["-crf", "23"])
@@ -177,7 +183,25 @@ fn get_ffmpeg_command(
         .arg(timestamp_path)
         .args(["-vsync", "0"]);
 
+    debug!("COMMAND: {:?}", cmd);
+    debug!("OUTPUT: {:?}", video_output_path);
+
+    list_ffmpeg_devices();
+
     cmd
+}
+
+fn list_ffmpeg_devices() {
+    FfmpegCommand::new()
+        .args(&["-f", "avfoundation", "-list_devices", "true", "-i", ""])
+        .spawn()
+        .expect("Failed to spawn FFmpeg")
+        .iter()
+        .expect("Failed to get output")
+        .for_each(|line| match line {
+            FfmpegEvent::Log(_, line) => debug!("[ffmpeg log] {}", line),
+            _ => {}
+        });
 }
 
 pub struct RecorderState {
@@ -223,49 +247,108 @@ impl RecorderState {
         // Start FFmpeg process in a separate thread
         let is_recording = self.is_recording.clone();
         let ffmpeg_child = self.ffmpeg_child.clone();
-        let ffmpeg_handle = thread::spawn(move || {
-            let child = get_ffmpeg_command(
-                video_dir_path.join("chunk_%04d.mkv").to_str().unwrap(),
-                segment_csv_path.to_str().unwrap(),
-                timestamp_path.to_str().unwrap(),
-            )
-            .spawn()
-            .expect("Failed to start FFmpeg");
 
-            *ffmpeg_child.lock().unwrap() = Some(child);
+        let ffmpeg_handle = thread::spawn({
+            let is_recording = is_recording.clone();
+            let ffmpeg_child = ffmpeg_child.clone();
 
-            while is_recording.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(100));
-            }
+            move || {
+                let child_result = get_ffmpeg_command(
+                    video_dir_path.join("chunk_%04d.mkv").to_str().unwrap(),
+                    segment_csv_path.to_str().unwrap(),
+                    timestamp_path.to_str().unwrap(),
+                )
+                .spawn();
+                // .expect("Failed to start FFmpeg");
 
-            // Gracefully stop FFmpeg
-            if let Some(mut child) = ffmpeg_child.lock().unwrap().take() {
-                info!("Stopping FFmpeg");
-                match child.quit() {
-                    Ok(_) => {
-                        match child.wait() {
-                            Ok(exit_status) => info!("FFmpeg stopped with {:?}", exit_status),
-                            Err(e) => {
-                                error!("Failed to stop FFmpeg: {:?}", e);
-                                warn!("Force killing FFmpeg");
-                                // If still running, force kill
-                                _ = child.kill();
-                                _ = child.wait();
+                let mut child = match child_result {
+                    Ok(child) => child,
+                    Err(e) => {
+                        error!("Failed to start FFmpeg: {}", e);
+                        error!("Error kind: {:?}", e.kind());
+                        error!("Raw OS error: {:?}", e.raw_os_error());
+
+                        // If it's a "not found" error, it might be a PATH issue
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            error!("FFmpeg command not found. Check if FFmpeg is installed and in PATH.");
+                            // You might want to print the current PATH for debugging
+                            if let Ok(path) = std::env::var("PATH") {
+                                error!("Current PATH: {}", path);
                             }
                         }
+
+                        panic!("Cannot proceed without FFmpeg");
                     }
-                    Err(e) => {
-                        error!("Failed to stop FFmpeg: {:?}", e);
-                        warn!("Force killing FFmpeg");
-                        // If still running, force kill
-                        _ = child.kill();
-                        _ = child.wait();
+                };
+
+                let stdout = child.take_stdout().expect("Failed to get stdout");
+                let stderr = child.take_stderr().expect("Failed to get stderr");
+
+                *ffmpeg_child.lock().expect("Failed to lock ffmpeg_child") = Some(child);
+
+                let stdout_handle = thread::spawn(move || {
+                    let reader = BufReader::new(stdout);
+                    for line in reader.lines() {
+                        if let Ok(line) = line {
+                            debug!("[ffmpeg stdout] {}", line);
+                        }
+                    }
+                });
+
+                let stderr_handle = thread::spawn(move || {
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines() {
+                        if let Ok(line) = line {
+                            debug!("[ffmpeg stderr] {}", line);
+                        }
+                    }
+                });
+
+                info!("Recording started and waiting for stop signal");
+                while is_recording.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(100));
+                }
+
+                // Gracefully stop FFmpeg
+                if let Some(mut child) = ffmpeg_child
+                    .lock()
+                    .expect("Failed to lock ffmpeg_child")
+                    .take()
+                {
+                    info!("Stopping FFmpeg");
+                    match child.quit() {
+                        Ok(_) => {
+                            match child.wait() {
+                                Ok(exit_status) => info!("FFmpeg stopped with {:?}", exit_status),
+                                Err(e) => {
+                                    error!("Failed to stop FFmpeg: {:?}", e);
+                                    warn!("Force killing FFmpeg");
+                                    // If still running, force kill
+                                    _ = child.kill();
+                                    _ = child.wait();
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to stop FFmpeg: {:?}", e);
+                            warn!("Force killing FFmpeg");
+                            // If still running, force kill
+                            _ = child.kill();
+                            _ = child.wait();
+                        }
                     }
                 }
+
+                // Wait for stdout and stderr threads to finish
+                stdout_handle.join().expect("Failed to join stdout thread");
+                stderr_handle.join().expect("Failed to join stderr thread");
             }
         });
 
-        *self.ffmpeg_handle.lock().unwrap() = Some(ffmpeg_handle);
+        *self
+            .ffmpeg_handle
+            .lock()
+            .expect("Failed to lock ffmpeg_handle") = Some(ffmpeg_handle);
 
         // Start event capture in a separate thread
         let session = self.session.clone();
@@ -289,10 +372,15 @@ impl RecorderState {
             );
         });
 
-        *self.event_handle.lock().unwrap() = Some(event_handle);
+        *self
+            .event_handle
+            .lock()
+            .expect("Failed to lock event_handle") = Some(event_handle);
 
         info!("Recording started successfully");
-        self.app_handle.emit("recording_started", ()).unwrap();
+        self.app_handle
+            .emit("recording_started", ())
+            .expect("Failed to emit event");
 
         Ok(())
     }

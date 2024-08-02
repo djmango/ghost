@@ -7,7 +7,7 @@ mod types;
 
 use log::{debug, LevelFilter};
 use recording::recording::RecorderState;
-use std::{fs, sync::Arc};
+use std::fs;
 use tauri::Manager;
 use tauri_plugin_log::{Target, TargetKind};
 
