@@ -23,6 +23,7 @@
     "store:allow-set",
     "store:allow-save",
     "store:allow-load",
-    "deep-link:default"
+    "deep-link:default",
+    "fs:default"
   ]
 }

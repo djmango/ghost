@@ -8,7 +8,7 @@ pub enum MouseAction {
     Left,
     Right,
     Middle,
-    Other(u8)
+    Other(u8),
 }
 
 impl fmt::Display for MouseAction {

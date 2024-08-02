@@ -10,31 +10,43 @@ use crate::recording::{start_recording, stop_recording};
 use log::LevelFilter;
 use recording::recording::RecorderState;
 use tauri::Listener;
-use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_fs::FsExt;
+// use tauri_plugin_deep_link::DeepLinkExt;
+use tauri::path::BaseDirectory;
 use tauri_plugin_log::{Target, TargetKind};
 
 fn main() {
     let mut ctx = tauri::generate_context!();
     tauri::Builder::default()
         .manage(RecorderState::new())
-        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
-            let app_handle = app.handle().clone();
-            app.listen("iinc-ghost://auth_callback", move |event| {
-                let payload = event.payload();
-                if let Some(jwt) = parse_jwt_from_url(payload) {
-                    match save_jwt_to_store(&app_handle, &jwt) {
-                        Ok(_) => println!("success"),
-                        Err(_) => println!("Fail"),
-                    }
-                }
-            });
-            Ok(())
+            // allowed the given directory
+            // let scope = app.fs_scope();
+            // scope.allow_directory("/path/to/directory", false);
+            // dbg!(scope.allowed());
+            // Ensure the base directory is created
+            BaseDirectory.Ok(())
         })
+        // .plugin(tauri_plugin_deep_link::init())
+        // .setup(|app| {
+        //     let app_handle = app.handle().clone();
+        //     app.listen("iinc-ghost://auth_callback", move |event| {
+        //         let payload = event.payload();
+        //         if let Some(jwt) = parse_jwt_from_url(payload) {
+        //             match save_jwt_to_store(&app_handle, &jwt) {
+        //                 Ok(_) => println!("success"),
+        //                 Err(_) => println!("Fail"),
+        //             }
+        //         }
+        //     });
+        //     Ok(())
+        // })
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // .plugin(tauri_plugin_window_state::Builder::default().build())
+        // .plugin(tauri_plugin_theme::init(ctx.config_mut()))
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(LevelFilter::Debug)

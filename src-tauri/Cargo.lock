@@ -2059,6 +2059,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-deep-link",
+ "tauri-plugin-fs",
  "tauri-plugin-log",
  "tauri-plugin-shell",
  "tauri-plugin-store",
@@ -4518,6 +4519,25 @@ dependencies = [
  "url",
  "windows-registry",
  "windows-result 0.2.0",
+]
+
+[[package]]
+name = "tauri-plugin-fs"
+version = "2.0.0-beta.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffa07ad2cb2933bec8d75a477b6028fc4f30779ed976f2809f8a9fd255e7f56f"
+dependencies = [
+ "anyhow",
+ "glob",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "tauri",
+ "tauri-plugin",
+ "thiserror",
+ "url",
+ "uuid",
 ]
 
 [[package]]
