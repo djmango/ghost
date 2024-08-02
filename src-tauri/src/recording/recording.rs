@@ -2,8 +2,10 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use csv::Writer;
 use ffmpeg_sidecar::child::FfmpegChild;
-use ffmpeg_sidecar::command::FfmpegCommand;
-use log::{error, info, warn};
+use ffmpeg_sidecar::command::{ffmpeg_is_installed, FfmpegCommand};
+use ffmpeg_sidecar::download::auto_download;
+use ffmpeg_sidecar::event::FfmpegEvent;
+use log::{debug, error, info, warn};
 use rdev::{listen, Event, EventType};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -56,16 +58,23 @@ struct RecordingSession {
 }
 
 impl RecordingSession {
-    fn new() -> Result<Self> {
+    fn new(app_handle: Arc<AppHandle>) -> Result<Self> {
+        // Store the recording session in a unique directory under app data (different but
+        // predictable per OS, we should always have read/write access)
         let id = Uuid::new_v4();
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let output_dir = PathBuf::from(format!("output/{}", timestamp));
+        let output_dir = app_handle
+            .path()
+            .app_data_dir()
+            .unwrap()
+            .join(format!("output/{}", timestamp));
         fs::create_dir_all(&output_dir).context("Failed to create output directory")?;
 
         let recordings_dir = output_dir.join("recordings");
         fs::create_dir_all(&recordings_dir).context("Failed to create recordings directory")?;
 
         Ok(RecordingSession {
+            // app_handle,
             id,
             events: Vec::new(),
             output_dir,
@@ -118,7 +127,11 @@ impl RecordingSession {
     }
 }
 
-fn get_ffmpeg_command(video_output_path: &str, segment_csv_path: &str, timestamp_path: &str) -> FfmpegCommand {
+fn get_ffmpeg_command(
+    video_output_path: &str,
+    segment_csv_path: &str,
+    timestamp_path: &str,
+) -> FfmpegCommand {
     let mut cmd = FfmpegCommand::new();
 
     // OS-specific input configuration
@@ -126,18 +139,22 @@ fn get_ffmpeg_command(video_output_path: &str, segment_csv_path: &str, timestamp
     {
         cmd.args(["-f", "avfoundation"])
             .args(["-capture_cursor", "1"])
-            .args(["-capture_mouse_clicks", "1"])
-            .args(["-i", "1:none"]);
+            // .args(["-capture_mouse_clicks", "1"])
+            .args(["-i", "2:none"]);
     }
 
     #[cfg(target_os = "windows")]
     {
-        cmd.args(["-f", "gdigrab"]).args(["-i", "desktop"]);
+        cmd.args(["-f", "gdigrab"])
+            .args(["-draw_mouse", "1"])
+            .args(["-i", "desktop"]);
     }
 
     #[cfg(target_os = "linux")]
     {
-        cmd.args(["-f", "x11grab"]).args(["-i", ":0.0"]);
+        cmd.args(["-f", "x11grab"])
+            .args(["-draw_mouse", "1"])
+            .args(["-i", ":0.0"]);
     }
 
     // Common configuration for all platforms
@@ -155,7 +172,7 @@ fn get_ffmpeg_command(video_output_path: &str, segment_csv_path: &str, timestamp
         .args(["-threads", "0"])
         .args(["-force_key_frames", "expr:gte(t,n_forced*60)"])
         .args(["-f", "segment"])
-        .args(["-segment_time", "60"])  // 60 seconds per chunk
+        .args(["-segment_time", "60"]) // 60 seconds per chunk
         .args(["-reset_timestamps", "1"])
         .args(["-segment_format", "mkv"])
         .args(["-segment_list_type", "csv"])
@@ -166,36 +183,65 @@ fn get_ffmpeg_command(video_output_path: &str, segment_csv_path: &str, timestamp
         .arg(timestamp_path)
         .args(["-vsync", "0"]);
 
+    debug!("COMMAND: {:?}", cmd);
+    debug!("OUTPUT: {:?}", video_output_path);
+
+    list_ffmpeg_devices();
+
     cmd
 }
 
+fn list_ffmpeg_devices() {
+    let (format, input) = if cfg!(target_os = "windows") {
+        ("gdigrab", "desktop")
+    } else if cfg!(target_os = "macos") {
+        ("avfoundation", "")
+    } else {
+        ("x11grab", ":0.0")
+    };
+
+    FfmpegCommand::new()
+        .args(&["-f", format, "-list_devices", "true", "-i", input])
+        .spawn()
+        .expect("Failed to spawn FFmpeg")
+        .iter()
+        .expect("Failed to get output")
+        .for_each(|event| {
+            if let FfmpegEvent::Log(_, line) = event {
+                debug!("[ffmpeg log] {}", line);
+            }
+        });
+}
+
 pub struct RecorderState {
-    session: Arc<Mutex<Option<RecordingSession>>>,
-    ffmpeg_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
-    ffmpeg_child: Arc<Mutex<Option<FfmpegChild>>>,
+    app_handle: Arc<AppHandle>,
     event_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    ffmpeg_child: Arc<Mutex<Option<FfmpegChild>>>,
+    ffmpeg_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     is_recording: Arc<AtomicBool>,
     runtime: Arc<TokioRuntime>,
+    session: Arc<Mutex<Option<RecordingSession>>>,
 }
 
 impl RecorderState {
-    pub fn new() -> Self {
+    pub fn new(app_handle: &AppHandle) -> Self {
         RecorderState {
-            session: Arc::new(Mutex::new(None)),
-            ffmpeg_handle: Arc::new(Mutex::new(None)),
-            ffmpeg_child: Arc::new(Mutex::new(None)),
+            app_handle: Arc::new(app_handle.clone()),
             event_handle: Arc::new(Mutex::new(None)),
+            ffmpeg_child: Arc::new(Mutex::new(None)),
+            ffmpeg_handle: Arc::new(Mutex::new(None)),
             is_recording: Arc::new(AtomicBool::new(false)),
             runtime: Arc::new(TokioRuntime::new().expect("Failed to create Tokio runtime")),
+            session: Arc::new(Mutex::new(None)),
         }
     }
 
-    fn start_recording(&self, app_handle: AppHandle) -> Result<()> {
+    fn start_recording(&self) -> Result<()> {
         let mut session_guard = self.session.lock().unwrap();
         if session_guard.is_some() {
             return Err(anyhow!("Recording is already in progress"));
         }
-        let new_session = RecordingSession::new()?;
+        let new_session = RecordingSession::new(self.app_handle.clone())?;
         let session_id = new_session.id;
         let video_dir_path = new_session.video_path();
         let video_dir_path_clone = video_dir_path.clone();
@@ -210,54 +256,114 @@ impl RecorderState {
         // Start FFmpeg process in a separate thread
         let is_recording = self.is_recording.clone();
         let ffmpeg_child = self.ffmpeg_child.clone();
-        let ffmpeg_handle = thread::spawn(move || {
-            let child = get_ffmpeg_command(
-                video_dir_path.join("chunk_%04d.mkv").to_str().unwrap(),
-                segment_csv_path.to_str().unwrap(),
-                timestamp_path.to_str().unwrap(),
-            )
-            .spawn()
-            .expect("Failed to start FFmpeg");
 
-            *ffmpeg_child.lock().unwrap() = Some(child);
+        let ffmpeg_handle = thread::spawn({
+            let is_recording = is_recording.clone();
+            let ffmpeg_child = ffmpeg_child.clone();
 
-            while is_recording.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(100));
-            }
+            move || {
+                let child_result = get_ffmpeg_command(
+                    video_dir_path.join("chunk_%04d.mkv").to_str().unwrap(),
+                    segment_csv_path.to_str().unwrap(),
+                    timestamp_path.to_str().unwrap(),
+                )
+                .spawn();
+                // .expect("Failed to start FFmpeg");
 
-            // Gracefully stop FFmpeg
-            if let Some(mut child) = ffmpeg_child.lock().unwrap().take() {
-                info!("Stopping FFmpeg");
-                match child.quit() {
-                    Ok(_) => {
-                        match child.wait() {
-                            Ok(exit_status) => info!("FFmpeg stopped with {:?}", exit_status),
-                            Err(e) => {
-                                error!("Failed to stop FFmpeg: {:?}", e);
-                                warn!("Force killing FFmpeg");
-                                // If still running, force kill
-                                _ = child.kill();
-                                _ = child.wait();
+                let mut child = match child_result {
+                    Ok(child) => child,
+                    Err(e) => {
+                        error!("Failed to start FFmpeg: {}", e);
+                        error!("Error kind: {:?}", e.kind());
+                        error!("Raw OS error: {:?}", e.raw_os_error());
+
+                        // If it's a "not found" error, it might be a PATH issue
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            error!("FFmpeg command not found. Check if FFmpeg is installed and in PATH.");
+                            // You might want to print the current PATH for debugging
+                            if let Ok(path) = std::env::var("PATH") {
+                                error!("Current PATH: {}", path);
                             }
                         }
+
+                        panic!("Cannot proceed without FFmpeg");
                     }
-                    Err(e) => {
-                        error!("Failed to stop FFmpeg: {:?}", e);
-                        warn!("Force killing FFmpeg");
-                        // If still running, force kill
-                        _ = child.kill();
-                        _ = child.wait();
+                };
+
+                let stdout = child.take_stdout().expect("Failed to get stdout");
+                let stderr = child.take_stderr().expect("Failed to get stderr");
+
+                *ffmpeg_child.lock().expect("Failed to lock ffmpeg_child") = Some(child);
+
+                let stdout_handle = thread::spawn(move || {
+                    let reader = BufReader::new(stdout);
+                    for line in reader.lines() {
+                        if let Ok(line) = line {
+                            debug!("[ffmpeg stdout] {}", line);
+                        }
+                    }
+                });
+
+                let stderr_handle = thread::spawn(move || {
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines() {
+                        if let Ok(line) = line {
+                            debug!("[ffmpeg stderr] {}", line);
+                        }
+                    }
+                });
+
+                info!("Recording started and waiting for stop signal");
+                while is_recording.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(100));
+                }
+
+                // Gracefully stop FFmpeg
+                if let Some(mut child) = ffmpeg_child
+                    .lock()
+                    .expect("Failed to lock ffmpeg_child")
+                    .take()
+                {
+                    info!("Stopping FFmpeg");
+                    match child.quit() {
+                        Ok(_) => {
+                            match child.wait() {
+                                Ok(exit_status) => info!("FFmpeg stopped with {:?}", exit_status),
+                                Err(e) => {
+                                    error!("Failed to stop FFmpeg: {:?}", e);
+                                    warn!("Force killing FFmpeg");
+                                    // If still running, force kill
+                                    _ = child.kill();
+                                    _ = child.wait();
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to stop FFmpeg: {:?}", e);
+                            warn!("Force killing FFmpeg");
+                            // If still running, force kill
+                            _ = child.kill();
+                            _ = child.wait();
+                        }
                     }
                 }
+
+                // Wait for stdout and stderr threads to finish
+                stdout_handle.join().expect("Failed to join stdout thread");
+                stderr_handle.join().expect("Failed to join stderr thread");
             }
         });
 
-        *self.ffmpeg_handle.lock().unwrap() = Some(ffmpeg_handle);
+        *self
+            .ffmpeg_handle
+            .lock()
+            .expect("Failed to lock ffmpeg_handle") = Some(ffmpeg_handle);
 
         // Start event capture in a separate thread
         let session = self.session.clone();
         let is_recording = self.is_recording.clone();
-        let main_window = app_handle
+        let main_window = self
+            .app_handle
             .get_webview_window("main")
             .expect("Failed to get main window");
         let runtime = self.runtime.clone();
@@ -275,15 +381,20 @@ impl RecorderState {
             );
         });
 
-        *self.event_handle.lock().unwrap() = Some(event_handle);
+        *self
+            .event_handle
+            .lock()
+            .expect("Failed to lock event_handle") = Some(event_handle);
 
         info!("Recording started successfully");
-        app_handle.emit("recording_started", ()).unwrap();
+        self.app_handle
+            .emit("recording_started", ())
+            .expect("Failed to emit event");
 
         Ok(())
     }
 
-    async fn stop_recording(&self, app_handle: AppHandle) -> Result<()> {
+    async fn stop_recording(&self) -> Result<()> {
         // Signal threads to stop
         self.is_recording.store(false, Ordering::SeqCst);
 
@@ -303,8 +414,8 @@ impl RecorderState {
         let mut session_guard = self.session.lock().unwrap();
         if let Some(s) = session_guard.as_mut() {
             s.save_events_to_csv()?;
-            info!("Recording saved to {:?}", s.output_dir);
-            app_handle
+            info!("Recording saved to {:?}", s.output_dir.canonicalize()?);
+            self.app_handle
                 .emit("recording_complete", s.output_dir.to_str())
                 .unwrap();
         } else {
@@ -500,18 +611,15 @@ fn monitor_segments(
 }
 
 #[tauri::command]
-pub fn start_recording(app_handle: AppHandle, state: State<'_, RecorderState>) {
-    _ = state.start_recording(app_handle);
+pub fn start_recording(state: State<'_, RecorderState>) {
+    info!("Ffmpeg installed: {:?}", ffmpeg_is_installed());
+    auto_download().unwrap_or_else(|e| error!("Failed to download ffmpeg: {:?}", e));
+
+    _ = state.start_recording();
 }
 
 #[tauri::command]
-pub async fn stop_recording(
-    app_handle: AppHandle<tauri::Wry>,
-    state: State<'_, RecorderState>,
-) -> Result<(), String> {
-    state
-        .stop_recording(app_handle)
-        .await
-        .map_err(|e| e.to_string())?;
+pub async fn stop_recording(state: State<'_, RecorderState>) -> Result<(), String> {
+    state.stop_recording().await.map_err(|e| e.to_string())?;
     Ok(())
 }
