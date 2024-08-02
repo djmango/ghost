@@ -2,7 +2,8 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use csv::Writer;
 use ffmpeg_sidecar::child::FfmpegChild;
-use ffmpeg_sidecar::command::FfmpegCommand;
+use ffmpeg_sidecar::command::{ffmpeg_is_installed, FfmpegCommand};
+use ffmpeg_sidecar::download::auto_download;
 use log::{error, info, warn};
 use rdev::{listen, Event, EventType};
 use serde::{Deserialize, Serialize};
@@ -135,10 +136,7 @@ fn get_ffmpeg_command(
     // OS-specific input configuration
     #[cfg(target_os = "macos")]
     {
-        cmd.args(["-f", "avfoundation"])
-            .args(["-capture_cursor", "1"])
-            .args(["-capture_mouse_clicks", "1"])
-            .args(["-i", "1:none"]);
+        cmd.args(["-f", "avfoundation"]).args(["-i", "1:none"]);
     }
 
     #[cfg(target_os = "windows")]
@@ -152,7 +150,9 @@ fn get_ffmpeg_command(
     }
 
     // Common configuration for all platforms
-    cmd.args(["-framerate", "30"])
+    cmd.args(["-capture_cursor", "1"])
+        // .args(["-capture_mouse_clicks", "1"])
+        .args(["-framerate", "30"])
         .args(["-vcodec", "libx264"])
         .args(["-preset", "ultrafast"])
         .args(["-crf", "23"])
@@ -515,6 +515,9 @@ fn monitor_segments(
 
 #[tauri::command]
 pub fn start_recording(state: State<'_, RecorderState>) {
+    info!("Ffmpeg installed: {:?}", ffmpeg_is_installed());
+    auto_download().expect("Failed to download ffmpeg");
+
     _ = state.start_recording();
 }
 
