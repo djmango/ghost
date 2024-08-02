@@ -3,7 +3,7 @@ use chrono::Utc;
 use csv::Writer;
 use ffmpeg_sidecar::child::FfmpegChild;
 use ffmpeg_sidecar::command::{ffmpeg_is_installed, FfmpegCommand};
-use ffmpeg_sidecar::download::{auto_download, download_ffmpeg_package};
+use ffmpeg_sidecar::download::auto_download;
 use ffmpeg_sidecar::event::FfmpegEvent;
 use log::{debug, error, info, warn};
 use rdev::{listen, Event, EventType};
@@ -604,14 +604,7 @@ fn monitor_segments(
 #[tauri::command]
 pub fn start_recording(state: State<'_, RecorderState>) {
     info!("Ffmpeg installed: {:?}", ffmpeg_is_installed());
-    auto_download().unwrap_or_else(|e| {
-        error!("Failed to download ffmpeg: {:?}", e);
-
-        // Now we manually download if we can
-        if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
-            download_ffmpeg_package(url, download_dir)
-        }
-    });
+    auto_download().unwrap_or_else(|e| error!("Failed to download ffmpeg: {:?}", e));
 
     _ = state.start_recording();
 }
