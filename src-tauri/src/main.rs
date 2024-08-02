@@ -35,7 +35,6 @@ fn main() {
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
-        .plugin(tauri_plugin_theme::init(ctx.config_mut()))
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(LevelFilter::Debug)
