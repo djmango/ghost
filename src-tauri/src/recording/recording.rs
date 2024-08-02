@@ -62,6 +62,9 @@ impl RecordingSession {
         let output_dir = PathBuf::from(format!("output/{}", timestamp));
         fs::create_dir_all(&output_dir).context("Failed to create output directory")?;
 
+        let recordings_dir = output_dir.join("recordings");
+        fs::create_dir_all(&recordings_dir).context("Failed to create recordings directory")?;
+
         Ok(RecordingSession {
             id,
             events: Vec::new(),
@@ -70,7 +73,7 @@ impl RecordingSession {
     }
 
     fn video_path(&self) -> PathBuf {
-        self.output_dir.join("recording.mkv")
+        self.output_dir.join("recordings")
     }
 
     fn segment_csv_path(&self) -> PathBuf {
@@ -115,7 +118,7 @@ impl RecordingSession {
     }
 }
 
-fn get_ffmpeg_command(output_path: &str, timestamp_path: &str) -> FfmpegCommand {
+fn get_ffmpeg_command(video_output_path: &str, segment_csv_path: &str, timestamp_path: &str) -> FfmpegCommand {
     let mut cmd = FfmpegCommand::new();
 
     // OS-specific input configuration
@@ -150,7 +153,14 @@ fn get_ffmpeg_command(output_path: &str, timestamp_path: &str) -> FfmpegCommand 
         .args(["-vcodec", "libx264"])
         .args(["-pix_fmt", "yuv420p"])
         .args(["-threads", "0"])
-        .arg(output_path)
+        .args(["-force_key_frames", "expr:gte(t,n_forced*60)"])
+        .args(["-f", "segment"])
+        .args(["-segment_time", "60"])  // 60 seconds per chunk
+        .args(["-reset_timestamps", "1"])
+        .args(["-segment_format", "mkv"])
+        .args(["-segment_list_type", "csv"])
+        .args(["-segment_list", segment_csv_path])
+        .output(video_output_path)
         .args(["-map", "[ts]"])
         .args(["-f", "mkvtimestamp_v2"])
         .arg(timestamp_path)
@@ -191,6 +201,7 @@ impl RecorderState {
         let video_dir_path_clone = video_dir_path.clone();
         let timestamp_path = new_session.timestamp_path();
         let segment_csv_path = new_session.segment_csv_path();
+        let segment_csv_path_clone = segment_csv_path.clone();
         *session_guard = Some(new_session);
         drop(session_guard);
 
@@ -201,7 +212,8 @@ impl RecorderState {
         let ffmpeg_child = self.ffmpeg_child.clone();
         let ffmpeg_handle = thread::spawn(move || {
             let child = get_ffmpeg_command(
-                video_dir_path.to_str().unwrap(),
+                video_dir_path.join("chunk_%04d.mkv").to_str().unwrap(),
+                segment_csv_path.to_str().unwrap(),
                 timestamp_path.to_str().unwrap(),
             )
             .spawn()
@@ -257,7 +269,7 @@ impl RecorderState {
         thread::spawn(move || {
             monitor_segments(
                 video_dir_path_clone,
-                segment_csv_path,
+                segment_csv_path_clone,
                 session_id,
                 runtime_clone,
             );
@@ -383,7 +395,7 @@ fn event_capture_task(
             runtime.spawn(async move {
                 let client = reqwest::Client::new();
                 let res = client
-                    .post("http://localhost:8000/devents/create")
+                    .post("https://echo.i.inc/devents/create")
                     .json(&create_devent_request)
                     .send()
                     .await;
@@ -409,7 +421,7 @@ fn monitor_segments(
     let mut last_position = 0;
 
     loop {
-        thread::sleep(Duration::from_secs(1));
+        thread::sleep(Duration::from_secs(5));
         let file = File::open(&segment_csv_path).unwrap();
         let mut reader = BufReader::new(file);
         reader.seek(SeekFrom::Start(last_position)).unwrap();
@@ -433,7 +445,7 @@ fn monitor_segments(
 
                         runtime.spawn(async move {
                             let res = client
-                                .post("http://localhost:8000/recordings/fetch_save_url")
+                                .post("https://echo.i.inc/recordings/fetch_save_url")
                                 .json(&SaveRecordingRequest {
                                     recording_id: Uuid::new_v4(),
                                     session_id,
