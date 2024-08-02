@@ -146,14 +146,14 @@ fn get_ffmpeg_command(
     #[cfg(target_os = "windows")]
     {
         cmd.args(["-f", "gdigrab"])
-            .args(["-capture_cursor", "1"])
+            .args(["-draw_mouse", "1"])
             .args(["-i", "desktop"]);
     }
 
     #[cfg(target_os = "linux")]
     {
         cmd.args(["-f", "x11grab"])
-            .args(["-capture_cursor", "1"])
+            .args(["-draw_mouse", "1"])
             .args(["-i", ":0.0"]);
     }
 
@@ -192,15 +192,24 @@ fn get_ffmpeg_command(
 }
 
 fn list_ffmpeg_devices() {
+    let (format, input) = if cfg!(target_os = "windows") {
+        ("gdigrab", "desktop")
+    } else if cfg!(target_os = "macos") {
+        ("avfoundation", "")
+    } else {
+        ("x11grab", ":0.0")
+    };
+
     FfmpegCommand::new()
-        .args(&["-f", "avfoundation", "-list_devices", "true", "-i", ""])
+        .args(&["-f", format, "-list_devices", "true", "-i", input])
         .spawn()
         .expect("Failed to spawn FFmpeg")
         .iter()
         .expect("Failed to get output")
-        .for_each(|line| match line {
-            FfmpegEvent::Log(_, line) => debug!("[ffmpeg log] {}", line),
-            _ => {}
+        .for_each(|event| {
+            if let FfmpegEvent::Log(_, line) = event {
+                debug!("[ffmpeg log] {}", line);
+            }
         });
 }
 
