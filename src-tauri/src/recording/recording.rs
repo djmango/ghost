@@ -191,15 +191,6 @@ fn get_ffmpeg_command(
     cmd
 }
 
-fn extract_capture_number(line: &str) -> Option<u32> {
-    let parts: Vec<&str> = line.split('[').collect();
-    if parts.len() >= 4 {
-        if let Some(number_str) = parts[3].split(']').next() {
-            return number_str.trim().parse().ok();
-        }
-    }
-    None
-}
 // only for selecting right dev in macos avfoundation
 fn get_ffmpeg_capture_device() -> u32 {
     let (format, input) = if cfg!(target_os = "windows") {
