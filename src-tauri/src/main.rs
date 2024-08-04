@@ -5,13 +5,17 @@ mod auth;
 mod recording;
 mod types;
 
+use std::fs;
+
 use log::{debug, LevelFilter};
 use recording::recording::RecorderState;
-use std::fs;
 use tauri::Manager;
 use tauri_plugin_log::{Target, TargetKind};
 
 use crate::recording::{start_recording, stop_recording};
+
+pub static BASE_URL: &str = "https://echo.i.inc";
+// pub static BASE_URL: &str = "http://localhost:8000";
 
 fn main() {
     tauri::Builder::default()

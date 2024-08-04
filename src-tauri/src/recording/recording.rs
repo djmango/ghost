@@ -1,28 +1,27 @@
+use std::fs;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use csv::Writer;
-use ffmpeg_sidecar::child::FfmpegChild;
-use ffmpeg_sidecar::command::{ffmpeg_is_installed, FfmpegCommand};
-use ffmpeg_sidecar::download::auto_download;
-use ffmpeg_sidecar::event::FfmpegEvent;
+use ffmpeg_sidecar::{
+    child::FfmpegChild,
+    command::{ffmpeg_is_installed, FfmpegCommand},
+    download::auto_download,
+    event::FfmpegEvent,
+};
 use log::{debug, error, info, warn};
 use rdev::{listen, Event, EventType};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering, AtomicU32};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
 use tauri::async_runtime::TokioRuntime;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use uuid::Uuid;
-use std::path::Path;
-//use tauri::window::Window;
-use tauri::{Manager, WebviewWindow};
 
 use crate::types::{KeyboardAction, KeyboardActionKey, MouseAction, ScrollAction};
+use crate::BASE_URL;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RecordingEvent {
@@ -34,7 +33,7 @@ struct RecordingEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeventRequestWrapper {
-    pub events: Vec<DeventRequest>
+    pub events: Vec<DeventRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +79,6 @@ impl RecordingSession {
         fs::create_dir_all(&recordings_dir).context("Failed to create recordings directory")?;
 
         Ok(RecordingSession {
-            // app_handle,
             id,
             events: Vec::new(),
             output_dir,
@@ -93,10 +91,6 @@ impl RecordingSession {
 
     fn segment_csv_path(&self) -> PathBuf {
         self.output_dir.join("segments.csv")
-    }
-
-    fn csv_path(&self) -> PathBuf {
-        self.output_dir.join("events.csv")
     }
 
     fn timestamp_path(&self) -> PathBuf {
@@ -181,7 +175,7 @@ fn get_ffmpeg_capture_device() -> u32 {
     let mut capture_device = 1;
 
     FfmpegCommand::new()
-        .args(&["-f", format, "-list_devices", "true", "-i", input])
+        .args(["-f", format, "-list_devices", "true", "-i", input])
         .spawn()
         .expect("Failed to spawn FFmpeg")
         .iter()
@@ -235,12 +229,12 @@ impl RecorderState {
             return Err(anyhow!("Recording is already in progress"));
         }
         let new_session = RecordingSession::new(self.app_handle.clone())?;
+        // TODO: use Arcs here
         let session_id = new_session.id;
         let video_dir_path = new_session.video_path();
         let video_dir_path_clone = video_dir_path.clone();
         let timestamp_path = new_session.timestamp_path();
         let segment_csv_path = new_session.segment_csv_path();
-        let segment_csv_path_clone = segment_csv_path.clone();
         *session_guard = Some(new_session);
         drop(session_guard);
 
@@ -261,7 +255,6 @@ impl RecorderState {
                     timestamp_path.to_str().unwrap(),
                 )
                 .spawn();
-                // .expect("Failed to start FFmpeg");
 
                 let mut child = match child_result {
                     Ok(child) => child,
@@ -273,7 +266,6 @@ impl RecorderState {
                         // If it's a "not found" error, it might be a PATH issue
                         if e.kind() == std::io::ErrorKind::NotFound {
                             error!("FFmpeg command not found. Check if FFmpeg is installed and in PATH.");
-                            // You might want to print the current PATH for debugging
                             if let Ok(path) = std::env::var("PATH") {
                                 error!("Current PATH: {}", path);
                             }
@@ -366,11 +358,7 @@ impl RecorderState {
                 .expect("Failed to start event capture");
         });
         thread::spawn(move || {
-            monitor_segments(
-                video_dir_path_clone,
-                session_id,
-                runtime_clone
-            );
+            monitor_segments(video_dir_path_clone, session_id, runtime_clone);
         });
 
         *self
@@ -402,10 +390,9 @@ impl RecorderState {
 
         info!("Stopping recording");
 
-        // Save events to CSV
+        // Save events to echo
         let mut session_guard = self.session.lock().unwrap();
         if let Some(s) = session_guard.as_mut() {
-
             let runtime = self.runtime.clone();
             let events = std::mem::take(&mut s.events); // Take ownership of events, leaving an empty Vec in its place
             let wrapper = DeventRequestWrapper { events };
@@ -413,7 +400,7 @@ impl RecorderState {
             runtime.spawn(async move {
                 let client = reqwest::Client::new();
                 let res = client
-                    .post("http://localhost:8000/devents/create")
+                    .post(format!("{BASE_URL}/devents/create"))
                     .json(&wrapper)
                     .send()
                     .await;
@@ -469,7 +456,6 @@ fn event_capture_task(
 
         let mut session_guard = session.lock().unwrap();
         if let Some(s) = session_guard.as_mut() {
-
             let mut devent_request = DeventRequest {
                 session_id: s.id,
                 mouse_action: None,
@@ -509,12 +495,7 @@ fn event_capture_task(
     Ok(())
 }
 
-
-fn monitor_segments(
-    recording_dir_path: PathBuf,
-    session_id: Uuid,
-    runtime: Arc<TokioRuntime>,
-) {
+fn monitor_segments(recording_dir_path: PathBuf, session_id: Uuid, runtime: Arc<TokioRuntime>) {
     let mut saved_segs: u32 = 0;
 
     loop {
@@ -534,7 +515,10 @@ fn monitor_segments(
             .max()
             .unwrap_or(0);
 
-        info!("highest_file_num: {}, saved_segs: {}", highest_file_num, saved_segs);
+        info!(
+            "highest_file_num: {}, saved_segs: {}",
+            highest_file_num, saved_segs
+        );
 
         if highest_file_num >= saved_segs {
             let file_to_upload = format!("chunk_{:04}.mkv", highest_file_num);
@@ -568,12 +552,12 @@ async fn upload_file(
     session_id: Uuid,
 ) {
     let res = client
-        .post("http://locahost:8000/recordings/fetch_save_url")
+        .post(format!("{BASE_URL}/recordings/fetch_save_url"))
         .json(&SaveRecordingRequest {
             recording_id: Uuid::new_v4(),
             session_id,
             start_timestamp_nanos: 0, // You might want to calculate this
-            duration_ms: 0, // You might want to calculate this
+            duration_ms: 0,           // You might want to calculate this
         })
         .send()
         .await;
@@ -582,7 +566,7 @@ async fn upload_file(
         Ok(res) => {
             let url = res.text().await.unwrap();
             let video_file_path = recording_dir_path.join(file_name);
-            
+
             match fs::read(&video_file_path) {
                 Ok(video_content) => {
                     let upload_res = client
