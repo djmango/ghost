@@ -407,7 +407,7 @@ impl RecorderState {
         if let Some(s) = session_guard.as_mut() {
 
             let runtime = self.runtime.clone();
-            let events = s.events.clone();
+            let events = std::mem::take(&mut s.events); // Take ownership of events, leaving an empty Vec in its place
             let wrapper = DeventRequestWrapper { events };
 
             runtime.spawn(async move {
@@ -429,6 +429,9 @@ impl RecorderState {
         } else {
             return Err(anyhow!("No active recording session"));
         }
+
+        // Clear the session after stopping
+        *session_guard = None;
 
         Ok(())
     }
