@@ -11,13 +11,14 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering, AtomicU32};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tauri::async_runtime::TokioRuntime;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
+use std::path::Path;
 //use tauri::window::Window;
 use tauri::{Manager, WebviewWindow};
 
@@ -32,7 +33,12 @@ struct RecordingEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateDeventRequest {
+pub struct DeventRequestWrapper {
+    pub events: Vec<DeventRequest>
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeventRequest {
     pub session_id: Uuid,
     pub mouse_action: Option<MouseAction>,
     pub keyboard_action: Option<KeyboardAction>,
@@ -53,7 +59,7 @@ pub struct SaveRecordingRequest {
 #[derive(Debug)]
 struct RecordingSession {
     id: Uuid,
-    events: Vec<RecordingEvent>,
+    events: Vec<DeventRequest>,
     output_dir: PathBuf,
 }
 
@@ -96,35 +102,6 @@ impl RecordingSession {
     fn timestamp_path(&self) -> PathBuf {
         self.output_dir.join("timestamps.txt")
     }
-
-    fn save_events_to_csv(&self) -> Result<()> {
-        let mut writer = Writer::from_path(self.csv_path())?;
-        writer.write_record(["timestamp", "event_type", "details", "mouse_x", "mouse_y"])?;
-
-        for event in &self.events {
-            let event_type = format!("{:?}", event.event.event_type);
-            let details = match event.event.event_type {
-                EventType::KeyPress(key) | EventType::KeyRelease(key) => format!("{:?}", key),
-                EventType::ButtonPress(button) | EventType::ButtonRelease(button) => {
-                    format!("{:?}", button)
-                }
-                EventType::MouseMove { x, y } => format!("x: {}, y: {}", x, y),
-                EventType::Wheel { delta_x, delta_y } => {
-                    format!("delta_x: {}, delta_y: {}", delta_x, delta_y)
-                }
-            };
-            writer.write_record([
-                &event.timestamp.to_string(),
-                &event_type,
-                &details,
-                &event.mouse_x.to_string(),
-                &event.mouse_y.to_string(),
-            ])?;
-        }
-
-        writer.flush()?;
-        Ok(())
-    }
 }
 
 fn get_ffmpeg_command(
@@ -137,10 +114,12 @@ fn get_ffmpeg_command(
     // OS-specific input configuration
     #[cfg(target_os = "macos")]
     {
+        let capture_device = get_ffmpeg_capture_device();
+        // if macos, must get ffmpeg device first.
         cmd.args(["-f", "avfoundation"])
             .args(["-capture_cursor", "1"])
             // .args(["-capture_mouse_clicks", "1"])
-            .args(["-i", "2:none"]);
+            .args(["-i", &format!("{}:none", capture_device)]);
     }
 
     #[cfg(target_os = "windows")]
@@ -172,7 +151,7 @@ fn get_ffmpeg_command(
         .args(["-threads", "0"])
         .args(["-force_key_frames", "expr:gte(t,n_forced*60)"])
         .args(["-f", "segment"])
-        .args(["-segment_time", "60"]) // 60 seconds per chunk
+        .args(["-segment_time", "15"]) // 60 seconds per chunk
         .args(["-reset_timestamps", "1"])
         .args(["-segment_format", "mkv"])
         .args(["-segment_list_type", "csv"])
@@ -186,12 +165,11 @@ fn get_ffmpeg_command(
     debug!("COMMAND: {:?}", cmd);
     debug!("OUTPUT: {:?}", video_output_path);
 
-    list_ffmpeg_devices();
-
     cmd
 }
 
-fn list_ffmpeg_devices() {
+// only for selecting right dev in macos avfoundation
+fn get_ffmpeg_capture_device() -> u32 {
     let (format, input) = if cfg!(target_os = "windows") {
         ("gdigrab", "desktop")
     } else if cfg!(target_os = "macos") {
@@ -199,6 +177,8 @@ fn list_ffmpeg_devices() {
     } else {
         ("x11grab", ":0.0")
     };
+
+    let mut capture_device = 1;
 
     FfmpegCommand::new()
         .args(&["-f", format, "-list_devices", "true", "-i", input])
@@ -208,9 +188,22 @@ fn list_ffmpeg_devices() {
         .expect("Failed to get output")
         .for_each(|event| {
             if let FfmpegEvent::Log(_, line) = event {
+                let target_str = "Capture screen 0";
+                if line.contains(target_str) {
+                    let parts: Vec<&str> = line.split('[').collect();
+                    if parts.len() >= 4 {
+                        if let Some(number_str) = parts[3].split(']').next() {
+                            if let Some(device_num) = number_str.trim().parse().ok() {
+                                capture_device = device_num;
+                            }
+                        }
+                    }
+                }
                 debug!("[ffmpeg log] {}", line);
             }
         });
+
+    capture_device
 }
 
 pub struct RecorderState {
@@ -369,15 +362,14 @@ impl RecorderState {
         let runtime = self.runtime.clone();
         let runtime_clone = runtime.clone();
         let event_handle = thread::spawn(move || {
-            event_capture_task(session, is_recording, main_window, runtime)
+            event_capture_task(session, is_recording, main_window)
                 .expect("Failed to start event capture");
         });
         thread::spawn(move || {
             monitor_segments(
                 video_dir_path_clone,
-                segment_csv_path_clone,
                 session_id,
-                runtime_clone,
+                runtime_clone
             );
         });
 
@@ -413,14 +405,33 @@ impl RecorderState {
         // Save events to CSV
         let mut session_guard = self.session.lock().unwrap();
         if let Some(s) = session_guard.as_mut() {
-            s.save_events_to_csv()?;
-            info!("Recording saved to {:?}", s.output_dir.canonicalize()?);
+
+            let runtime = self.runtime.clone();
+            let events = std::mem::take(&mut s.events); // Take ownership of events, leaving an empty Vec in its place
+            let wrapper = DeventRequestWrapper { events };
+
+            runtime.spawn(async move {
+                let client = reqwest::Client::new();
+                let res = client
+                    .post("http://localhost:8000/devents/create")
+                    .json(&wrapper)
+                    .send()
+                    .await;
+
+                match res {
+                    Ok(_) => info!("Event saved successfully"),
+                    Err(e) => error!("Failed to send request: {:?}", e),
+                }
+            });
             self.app_handle
-                .emit("recording_complete", s.output_dir.to_str())
+                .emit("recording_complete", "sent to echo")
                 .unwrap();
         } else {
             return Err(anyhow!("No active recording session"));
         }
+
+        // Clear the session after stopping
+        *session_guard = None;
 
         Ok(())
     }
@@ -430,7 +441,6 @@ fn event_capture_task(
     session: Arc<Mutex<Option<RecordingSession>>>,
     is_recording: Arc<AtomicBool>,
     main_window: WebviewWindow,
-    runtime: Arc<TokioRuntime>,
 ) -> Result<()> {
     let mut last_mouse_pos = (0.0, 0.0);
     let _ = listen(move |event| {
@@ -457,20 +467,10 @@ fn event_capture_task(
         // NOTE: drag halts mousemove so we need to update last_mouse_pos here, not a nice way to
         // do that with rdev so we can use window or something
 
-        let recording_event = RecordingEvent {
-            timestamp,
-            event: event.clone(),
-            mouse_x: last_mouse_pos.0,
-            mouse_y: last_mouse_pos.1,
-        };
-
-        // info!("{:?}", recording_event);
-
         let mut session_guard = session.lock().unwrap();
         if let Some(s) = session_guard.as_mut() {
-            s.events.push(recording_event);
 
-            let mut create_devent_request = CreateDeventRequest {
+            let mut devent_request = DeventRequest {
                 session_id: s.id,
                 mouse_action: None,
                 keyboard_action: None,
@@ -483,11 +483,11 @@ fn event_capture_task(
             match event.event_type {
                 EventType::ButtonPress(btn) => {
                     let mouse_action: MouseAction = btn.into();
-                    create_devent_request.mouse_action = Some(mouse_action);
+                    devent_request.mouse_action = Some(mouse_action);
                 }
                 EventType::KeyPress(key) => {
                     let keyboard_action: KeyboardActionKey = key.into();
-                    create_devent_request.keyboard_action = Some(KeyboardAction {
+                    devent_request.keyboard_action = Some(KeyboardAction {
                         key: keyboard_action,
                         duration: 100, // TODO: make this dynamic by tracking keypress and keyrelease events
                     });
@@ -497,116 +497,110 @@ fn event_capture_task(
                         x: delta_x as i32,
                         y: delta_y as i32,
                     };
-                    create_devent_request.scroll_action = Some(scroll_action);
+                    devent_request.scroll_action = Some(scroll_action);
                 }
                 _ => return,
             };
 
-            let runtime = runtime.clone();
-            runtime.spawn(async move {
-                let client = reqwest::Client::new();
-                let res = client
-                    .post("https://echo.i.inc/devents/create")
-                    .json(&create_devent_request)
-                    .send()
-                    .await;
-
-                match res {
-                    Ok(_) => info!("Event saved successfully"),
-                    Err(e) => error!("Failed to send request: {:?}", e),
-                }
-            });
+            s.events.push(devent_request);
         }
     })
     .map_err(|e| anyhow!("Event capture failed: {:?}", e));
-
     Ok(())
 }
 
+
 fn monitor_segments(
     recording_dir_path: PathBuf,
-    segment_csv_path: PathBuf,
     session_id: Uuid,
     runtime: Arc<TokioRuntime>,
 ) {
-    let mut last_position = 0;
+    let mut saved_segs: u32 = 0;
 
     loop {
         thread::sleep(Duration::from_secs(5));
-        let file = File::open(&segment_csv_path).unwrap();
-        let mut reader = BufReader::new(file);
-        reader.seek(SeekFrom::Start(last_position)).unwrap();
 
-        let mut buffer = String::new();
-        loop {
-            buffer.clear();
-            match reader.read_line(&mut buffer) {
-                Ok(0) => break, // End of file
-                Ok(_) => {
-                    // Process the new segment
-                    let parts: Vec<&str> = buffer.trim().split(',').collect();
-                    if parts.len() == 3 {
-                        let filename = parts[0].to_string();
-                        let start_time: f64 = parts[1].parse().unwrap_or_default();
-                        let end_time: f64 = parts[2].parse().unwrap_or_default();
-                        info!("New segment: {}, {} to {}", filename, start_time, end_time);
-
-                        let client = reqwest::Client::new();
-                        let recording_dir_path_clone = recording_dir_path.clone();
-
-                        runtime.spawn(async move {
-                            let res = client
-                                .post("https://echo.i.inc/recordings/fetch_save_url")
-                                .json(&SaveRecordingRequest {
-                                    recording_id: Uuid::new_v4(),
-                                    session_id,
-                                    start_timestamp_nanos: start_time as i64,
-                                    duration_ms: (end_time - start_time) as u64,
-                                })
-                                .send()
-                                .await;
-
-                            match res {
-                                Ok(res) => {
-                                    let url = res.text().await.unwrap();
-
-                                    let video_file_path = recording_dir_path_clone.join(filename);
-                                    let mut video_file = File::open(&video_file_path).unwrap();
-                                    let mut video_content = Vec::new();
-                                    video_file.read_to_end(&mut video_content).unwrap();
-
-                                    let upload_res = client
-                                        .put(url)
-                                        .header("Content-Type", "video/x-matroska")
-                                        .body(video_content)
-                                        .send()
-                                        .await;
-
-                                    match upload_res {
-                                        Ok(_) => info!("Uploaded recording successfully"),
-                                        Err(e) => error!("Failed to upload recording: {:?}", e),
-                                    }
-                                }
-                                Err(e) => error!("Failed to send request: {:?}", e),
-                            }
-                        });
-                    }
-
-                    // Update last_position after processing each line
-                    match reader.stream_position() {
-                        Ok(pos) => last_position = pos,
-                        Err(e) => {
-                            error!("Failed to get stream position: {:?}", e);
-                            break;
-                        }
-                    };
+        let highest_file_num = fs::read_dir(&recording_dir_path)
+            .expect("Failed to read directory")
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let file_name = entry.file_name().into_string().ok()?;
+                if file_name.ends_with(".mkv") {
+                    file_name[6..10].parse::<u32>().ok()
+                } else {
+                    None
                 }
-                Err(e) => {
-                    error!("Error reading line: {:?}", e);
-                    break;
-                }
+            })
+            .max()
+            .unwrap_or(0);
+
+        info!("highest_file_num: {}, saved_segs: {}", highest_file_num, saved_segs);
+
+        if highest_file_num >= saved_segs {
+            let file_to_upload = format!("chunk_{:04}.mkv", highest_file_num);
+            let file_path = recording_dir_path.join(&file_to_upload);
+
+            if file_path.exists() {
+                let client = reqwest::Client::new();
+                let recording_dir_path_clone = recording_dir_path.clone();
+                let session_id_clone = session_id;
+                info!("uploading...");
+                runtime.spawn(async move {
+                    upload_file(
+                        &client,
+                        &recording_dir_path_clone,
+                        &file_to_upload,
+                        session_id_clone,
+                    )
+                    .await;
+                });
+
+                saved_segs = highest_file_num + 1;
             }
         }
+    }
+}
+// https://echo.i.inc/recordings/fetch_save_url
+async fn upload_file(
+    client: &reqwest::Client,
+    recording_dir_path: &Path,
+    file_name: &str,
+    session_id: Uuid,
+) {
+    let res = client
+        .post("http://locahost:8000/recordings/fetch_save_url")
+        .json(&SaveRecordingRequest {
+            recording_id: Uuid::new_v4(),
+            session_id,
+            start_timestamp_nanos: 0, // You might want to calculate this
+            duration_ms: 0, // You might want to calculate this
+        })
+        .send()
+        .await;
+
+    match res {
+        Ok(res) => {
+            let url = res.text().await.unwrap();
+            let video_file_path = recording_dir_path.join(file_name);
+            
+            match fs::read(&video_file_path) {
+                Ok(video_content) => {
+                    let upload_res = client
+                        .put(url)
+                        .header("Content-Type", "video/x-matroska")
+                        .body(video_content)
+                        .send()
+                        .await;
+
+                    match upload_res {
+                        Ok(_) => info!("Uploaded recording {} successfully", file_name),
+                        Err(e) => error!("Failed to upload recording {}: {:?}", file_name, e),
+                    }
+                }
+                Err(e) => error!("Failed to read file {}: {:?}", file_name, e),
+            }
+        }
+        Err(e) => error!("Failed to send request for {}: {:?}", file_name, e),
     }
 }
 
