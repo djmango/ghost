@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering, AtomicU32};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -137,10 +137,12 @@ fn get_ffmpeg_command(
     // OS-specific input configuration
     #[cfg(target_os = "macos")]
     {
+        let capture_device = get_ffmpeg_capture_device();
+        // if macos, must get ffmpeg device first.
         cmd.args(["-f", "avfoundation"])
             .args(["-capture_cursor", "1"])
             // .args(["-capture_mouse_clicks", "1"])
-            .args(["-i", "2:none"]);
+            .args(["-i", &format!("{}:none", capture_device)]);
     }
 
     #[cfg(target_os = "windows")]
@@ -186,12 +188,20 @@ fn get_ffmpeg_command(
     debug!("COMMAND: {:?}", cmd);
     debug!("OUTPUT: {:?}", video_output_path);
 
-    list_ffmpeg_devices();
-
     cmd
 }
 
-fn list_ffmpeg_devices() {
+fn extract_capture_number(line: &str) -> Option<u32> {
+    let parts: Vec<&str> = line.split('[').collect();
+    if parts.len() >= 4 {
+        if let Some(number_str) = parts[3].split(']').next() {
+            return number_str.trim().parse().ok();
+        }
+    }
+    None
+}
+// only for selecting right dev in macos avfoundation
+fn get_ffmpeg_capture_device() -> u32 {
     let (format, input) = if cfg!(target_os = "windows") {
         ("gdigrab", "desktop")
     } else if cfg!(target_os = "macos") {
@@ -199,6 +209,8 @@ fn list_ffmpeg_devices() {
     } else {
         ("x11grab", ":0.0")
     };
+
+    let mut capture_device = 1;
 
     FfmpegCommand::new()
         .args(&["-f", format, "-list_devices", "true", "-i", input])
@@ -208,9 +220,22 @@ fn list_ffmpeg_devices() {
         .expect("Failed to get output")
         .for_each(|event| {
             if let FfmpegEvent::Log(_, line) = event {
+                let target_str = "Capture screen 0";
+                if line.contains(target_str) {
+                    let parts: Vec<&str> = line.split('[').collect();
+                    if parts.len() >= 4 {
+                        if let Some(number_str) = parts[3].split(']').next() {
+                            if let Some(device_num) = number_str.trim().parse().ok() {
+                                capture_device = device_num;
+                            }
+                        }
+                    }
+                }
                 debug!("[ffmpeg log] {}", line);
             }
         });
+
+    capture_device
 }
 
 pub struct RecorderState {
@@ -533,7 +558,10 @@ fn monitor_segments(
 
     loop {
         thread::sleep(Duration::from_secs(5));
-        let file = File::open(&segment_csv_path).unwrap();
+        let file = match File::open(&segment_csv_path) {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
         let mut reader = BufReader::new(file);
         reader.seek(SeekFrom::Start(last_position)).unwrap();
 
