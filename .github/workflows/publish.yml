@@ -48,10 +48,10 @@ jobs:
           # targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.platform == 'windows-latest' && 'aarch64-pc-windows-msvc,x86_64-pc-windows-msvc' || '' }}
 
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: "./src-tauri -> target"
+      # - name: Rust cache
+      #   uses: swatinem/rust-cache@v2
+      #   with:
+      #     workspaces: "./src-tauri -> target"
 
       - name: install frontend dependencies
         # If you don't have `beforeBuildCommand` configured you may want to build your frontend here too.
