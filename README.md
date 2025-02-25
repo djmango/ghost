@@ -1,6 +1,4 @@
-# Ghost - AI Training Data Recorder
-
-![Ghost Logo](app-icon.png)
+# Ghost - Computer-Use AI Training Data Recorder
 
 ## Overview
 
